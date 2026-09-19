@@ -11,6 +11,7 @@ import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
 import { listenForClap } from './lib/clap'
+import { listenForWakeWord } from './lib/wakeword'
 import * as camera from './lib/camera'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
@@ -555,6 +556,25 @@ export default function App() {
       gone = true
       live?.stop()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase])
+
+  // -- his name, at the ignition screen -------------------------------------
+
+  /**
+   * Saying "Hey Jarvis" at a dark reactor should bring him up, the same way a
+   * clap does. It could not before: the real voice loop is armed inside
+   * ignite(), so until someone had already pressed the button there was nothing
+   * listening for his name.
+   *
+   * Torn down on the way out of 'offline' for the same reason the clap listener
+   * is — the microphone is about to belong to the voice loop, and two
+   * recognisers on one stream each hear about half of what is said.
+   */
+  useEffect(() => {
+    if (phase !== 'offline') return
+    const live = listenForWakeWord(() => void powerOn())
+    return () => live.stop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase])
 

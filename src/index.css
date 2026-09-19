@@ -105,6 +105,9 @@ body::after {
   align-items: center;
   gap: 10px;
   font-size: 10px;
+  /* Centred between the wordmark and the clock. `margin-left: auto` alone put
+     it hard against the clock once there were three children in the header. */
+  margin-right: auto;
   /* The header is space-between, so with the wordmark hidden the status line
      would slide to the left edge on its own. Claiming the free space keeps it
      pinned right whether or not the brand is there — and with both present it
@@ -1895,4 +1898,98 @@ kbd {
   object-fit: cover;
   transform: scaleX(-1);
   background: #000;
+}
+
+
+/* --- clock, status block and frame ------------------------------------- */
+
+.hud-clock {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: right;
+}
+
+.clock-date {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 8px;
+  letter-spacing: 0.3em;
+  opacity: 0.5;
+  text-transform: uppercase;
+}
+
+.clock-time {
+  font-size: 22px;
+  font-weight: 300;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 22px color-mix(in srgb, var(--accent) 60%, transparent);
+  /* A vertical rule, the way the reference frames the time. */
+  padding-left: 14px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.sys-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 156px;
+  margin-bottom: 22px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.sys-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 8px;
+  letter-spacing: 0.16em;
+}
+
+.sys-key { opacity: 0.45; }
+
+.sys-val {
+  color: var(--accent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* A row that is not live reads as dim rather than coloured, so a dropped link
+   is visible at a glance instead of being another glowing green word. */
+.sys-val-off {
+  color: inherit;
+  opacity: 0.35;
+  text-shadow: none;
+}
+
+/* The faint engineering grid behind everything. Two repeating-linear-gradients
+   rather than an image: no request, no cache, and it re-tints with the accent
+   when JARVIS changes the theme. */
+.hud-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.16;
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      color-mix(in srgb, var(--accent) 22%, transparent) 0 1px,
+      transparent 1px 72px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--accent) 22%, transparent) 0 1px,
+      transparent 1px 72px
+    );
+  /* Fades out towards the middle so the reactor is never seen through a mesh. */
+  mask-image: radial-gradient(ellipse at center, transparent 34%, black 88%);
+}
+
+@media (max-width: 1100px) {
+  .sys-panel { display: none; }
+  .clock-date { display: none; }
+  .clock-time { font-size: 16px; border-left: 0; padding-left: 0; }
 }

@@ -6,6 +6,7 @@ import { BladeSweep, Blades } from './Blades'
 import { Effects } from './Effects'
 import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
+import { isConnected } from '../lib/bridge'
 
 const statusText: Record<Phase, string> = {
   offline: 'OFFLINE',
@@ -144,6 +145,95 @@ function DecodeText({ text }: { text: string }) {
   )
 }
 
+/* ------------------------------------------------------------------- clock */
+
+/**
+ * The wall clock, ticking on the second.
+ *
+ * Aligned to the next second boundary rather than set to a flat 1000ms
+ * interval: a naive interval drifts by however long the page was busy, and the
+ * visible symptom is a minute that flips a second or two after the phone in
+ * your hand does. Re-arming against `Date.now() % 1000` puts every tick back on
+ * the boundary, so the readout changes when the real minute changes.
+ *
+ * Deliberately locale-driven — `toLocaleTimeString` gives whoever is standing
+ * in front of it their own conventions rather than the author's.
+ */
+function useNow(): Date {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>
+    const tick = () => {
+      setNow(new Date())
+      timer = setTimeout(tick, 1000 - (Date.now() % 1000))
+    }
+    timer = setTimeout(tick, 1000 - (Date.now() % 1000))
+    return () => clearTimeout(timer)
+  }, [])
+  return now
+}
+
+function Clock() {
+  const now = useNow()
+  return (
+    <div className="hud-clock">
+      <div className="clock-date">
+        <span className="clock-day">
+          {now.toLocaleDateString(undefined, { weekday: 'long' })}
+        </span>
+        <span className="clock-md">
+          {now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+        </span>
+      </div>
+      <div className="clock-time">
+        {now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The status block.
+ *
+ * Every row is something the page actually knows. There is no CPU or memory
+ * readout here and that is not an oversight: a browser cannot see either, so
+ * the only way to print them would be to make them up, and a dashboard that
+ * invents its own numbers is worse than one that shows four true ones.
+ *
+ * It shares the clock's tick, which is also what re-polls the socket — the
+ * WebSocket's readyState is not something the store hears about, so a link that
+ * drops would otherwise keep reading SECURE until the next unrelated render.
+ */
+function SystemStatus({
+  phase,
+  servers,
+  voice,
+}: {
+  phase: Phase
+  servers: number
+  voice: string | null
+}) {
+  useNow()
+  const linked = isConnected()
+  const rows: [string, string, boolean][] = [
+    ['POWER CORE', phase === 'offline' ? 'STANDBY' : 'ONLINE', phase !== 'offline'],
+    ['SYSTEMS', `${servers} LINKED`, servers > 0],
+    ['NETWORK', linked ? 'SECURE' : 'DOWN', linked],
+    ['VOICE MODULE', voice ? 'ACTIVE' : 'IDLE', !!voice],
+  ]
+  return (
+    <div className="sys-panel">
+      <div className="rail-title">SYSTEM STATUS</div>
+      {rows.map(([k, v, ok]) => (
+        <div className="sys-row" key={k}>
+          <span className="sys-key">{k}</span>
+          <span className={ok ? 'sys-val' : 'sys-val sys-val-off'}>{v}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /* --------------------------------------------------------------------- hud */
 
 export function Hud() {
@@ -182,6 +272,11 @@ export function Hud() {
           behind the transcript and the panels without a z-index war. */}
       <BladeSweep />
 
+      {/* The frame the rest of the chrome hangs in. Pointer-events: none and
+          purely decorative — it must never be in front of anything clickable,
+          which is the mistake Ignition.tsx documents at length. */}
+      <div className="hud-grid" aria-hidden="true" />
+
       <Corner at="tl" />
       <Corner at="tr" />
       <Corner at="bl" />
@@ -205,6 +300,8 @@ export function Hud() {
             {phase === 'boot' && bootNote ? bootNote : statusText[phase]}
           </span>
         </div>
+
+        <Clock />
       </header>
 
       {/* Left rail: which integrations are live */}
@@ -227,6 +324,8 @@ export function Hud() {
 
       {/* Right rail: live telemetry, mostly for flavour */}
       <aside className="rail rail-right">
+        <SystemStatus phase={phase} servers={connected.length + 1} voice={voice} />
+
         <div className="rail-title">SIGNAL</div>
         <div className="meter">
           <div className="meter-fill" style={{ height: `${level * 100}%` }} />

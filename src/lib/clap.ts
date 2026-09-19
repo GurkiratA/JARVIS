@@ -18,12 +18,12 @@ import { getMic } from './audio'
  */
 
 /** How far above the running floor counts as a candidate transient. */
-const PEAK_OVER_FLOOR = 7
+const PEAK_OVER_FLOOR = 5
 /** ...and an absolute floor, so a silent room cannot make a whisper a clap. */
-const MIN_PEAK = 0.055
+const MIN_PEAK = 0.04
 
 /** The room has to have been this quiet just before the strike. */
-const QUIET_BEFORE = 0.16
+const QUIET_BEFORE = 0.22
 /** Frames of history kept — about a third of a second at 60fps. */
 const HISTORY = 20
 /** How many frames back "just before" means. */
@@ -32,7 +32,7 @@ const LOOKBACK = 5
 /** Confirmed once the level has fallen this far below the peak... */
 const DECAY_TO = 0.35
 /** ...within this long. Speech and music simply do not collapse this fast. */
-const DECAY_MS = 130
+const DECAY_MS = 160
 /** A candidate that has not decayed by now was something sustained. */
 const GIVE_UP_MS = 260
 

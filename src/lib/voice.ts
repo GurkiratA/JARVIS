@@ -77,7 +77,7 @@ const WAKE_DEBOUNCE = 1500
  * used to be silently discarded, so the wake word "just didn't work" with no
  * indication why. Better a rare false wake than a name that does not answer.
  */
-const WAKE =
+export const WAKE =
   /\b(?:hey|hi|ok|okay|yo)?\s*(?:jarvis|jarvys|jervis|jarvis's|travis|jarviss|java's|jarv)\b(?!'s)/i
 
 /** Everything after the wake phrase, which is usually the actual command. */
