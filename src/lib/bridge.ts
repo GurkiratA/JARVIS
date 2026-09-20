@@ -83,6 +83,17 @@ export function watchCapture(fn: (req: CaptureRequest) => Promise<CaptureResult>
   onCapture = fn
 }
 
+/** Same request/reply shape as CaptureRequest, for the microphone instead of
+ *  the camera — the bridge asks for a ~20s enrollment clip when enroll_voice
+ *  runs, base64-encoded back the same way a camera frame is. */
+export type VoiceEnrollRequest = { seconds: number }
+export type VoiceEnrollResult = { data?: string; mimeType?: string; error?: string }
+
+let onVoiceEnroll: ((req: VoiceEnrollRequest) => Promise<VoiceEnrollResult>) | null = null
+export function watchVoiceEnroll(fn: (req: VoiceEnrollRequest) => Promise<VoiceEnrollResult>) {
+  onVoiceEnroll = fn
+}
+
 /** Blades arrive the same way panels do — pushed mid-turn, so the article is
  *  already open as he starts the sentence about it. */
 let onBlade: ((blade: Blade) => void) | null = null
@@ -200,6 +211,20 @@ function dispatch(ws: WebSocket) {
           seconds: Math.max(2, Math.min(15, Number(msg.seconds) || 6)),
           when: msg.when === 'past' ? 'past' : 'now',
         })
+          .then(reply)
+          .catch((err) => reply({ error: String(err?.message ?? err) }))
+      }
+    } else if (msg.type === 'voice-enroll' && msg.id) {
+      const id = msg.id
+      const reply = (payload: Record<string, unknown>) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'reply', id, ...payload }))
+        }
+      }
+      if (!onVoiceEnroll) {
+        reply({ error: 'The interface has no microphone-enrollment handler.' })
+      } else {
+        onVoiceEnroll({ seconds: Math.max(5, Math.min(30, Number(msg.seconds) || 20)) })
           .then(reply)
           .catch((err) => reply({ error: String(err?.message ?? err) }))
       }

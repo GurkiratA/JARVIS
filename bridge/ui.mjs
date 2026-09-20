@@ -311,6 +311,22 @@ Use it when the user says clear the screen, or when a topic is finished and the
 leftovers from the last one would confuse what comes next. It does not touch the
 theme, the reactor or the orbits — \`ui_reset\` does that.`
 
+const HANDS_DESCRIPTION = `Turn hand-gesture control of the interface on or off.
+
+Opens the user's camera and tracks their hands so they can point, pinch and
+frame gestures to grab, move and resize blades with their hands instead of a
+mouse — the same thing the G key does. Use it whenever they ask to control you
+with their hands, or say to turn gesture or hand control on or off by name —
+"use my hands", "let me control this with my hands", "turn off hand tracking".
+
+The camera light comes on and a live indicator appears on screen for as long
+as it runs, so say in one short sentence that you are turning it on — this is
+a camera activating without them reaching for anything themselves, and that is
+exactly the kind of thing that must never happen silently.
+
+Turning it off is always fine to do quietly; nothing about stopping needs
+announcing.`
+
 const RESET_DESCRIPTION = `Put the entire interface back to stock.
 
 Colours, reactor, orbits, chrome — everything returns to the way it looks on a
@@ -340,8 +356,9 @@ export function uiServer(emit) {
     version: '1.0.0',
     instructions:
       'JARVIS\'s control of his own interface — colour, reactor, orbiting ' +
-      'images, chrome, effects. Change it when the change carries meaning, ' +
-      'and put it back afterwards with ui_reset.',
+      'images, chrome, effects, and his own hand-tracking (ui_hands). Change ' +
+      'it when the change carries meaning, and put it back afterwards with ' +
+      'ui_reset.',
     // Same reasoning as the display server: behind tool search it would never
     // occur to the model that the interface is something it can touch.
     alwaysLoad: true,
@@ -489,6 +506,20 @@ export function uiServer(emit) {
         emit('reset', {})
         return ok('Interface restored.')
       }),
+
+      tool(
+        'ui_hands',
+        HANDS_DESCRIPTION,
+        { on: looseBool('true to start hand tracking, false to stop it.') },
+        async (args) => {
+          const on = toBool(args.on)
+          if (on === undefined) {
+            return refuse('No change — say whether hand tracking should be on or off.')
+          }
+          emit('hands', { on })
+          return ok(on ? 'Hand tracking starting.' : 'Hand tracking stopped.')
+        },
+      ),
     ],
   })
 }

@@ -17,22 +17,36 @@ import { getMic } from './audio'
  * anything that fails one of them. Loudness alone is not evidence.
  */
 
-/** How far above the running floor counts as a candidate transient. */
-const PEAK_OVER_FLOOR = 5
-/** ...and an absolute floor, so a silent room cannot make a whisper a clap. */
-const MIN_PEAK = 0.04
+/**
+ * How far above the running floor counts as a candidate transient.
+ *
+ * Loosened from 7: `getMic()` (audio.ts) asks for autoGainControl, which
+ * actively works against this whole detector — its job is to smooth out
+ * exactly the kind of sudden peak a clap is, and on a laptop's built-in mic it
+ * can flatten one enough that it never cleared the old bar at all. Turning
+ * AGC off would fix this more directly but would also touch the shared
+ * stream the voice loop depends on for consistent volume, which is not a
+ * trade to make for a convenience feature. Loosening the detector instead.
+ */
+const PEAK_OVER_FLOOR = 4.5
+/** ...and an absolute floor, so a silent room cannot make a whisper a clap.
+ *  Also loosened, from 0.055, for the same AGC reason. */
+const MIN_PEAK = 0.035
 
-/** The room has to have been this quiet just before the strike. */
-const QUIET_BEFORE = 0.22
+/** The room has to have been this quiet just before the strike. Loosened
+ *  from 0.16 — AGC's smoothing also raises the apparent noise floor a touch. */
+const QUIET_BEFORE = 0.24
 /** Frames of history kept — about a third of a second at 60fps. */
 const HISTORY = 20
 /** How many frames back "just before" means. */
 const LOOKBACK = 5
 
 /** Confirmed once the level has fallen this far below the peak... */
-const DECAY_TO = 0.35
-/** ...within this long. Speech and music simply do not collapse this fast. */
-const DECAY_MS = 160
+const DECAY_TO = 0.45
+/** ...within this long. Speech and music simply do not collapse this fast.
+ *  Both loosened (from 0.35 / 130) — AGC smears a clap's tail out slightly,
+ *  same reasoning as PEAK_OVER_FLOOR above. */
+const DECAY_MS = 180
 /** A candidate that has not decayed by now was something sustained. */
 const GIVE_UP_MS = 260
 

@@ -151,10 +151,14 @@ const SELF_GUARD_MS = 350
  * already. All this window has to catch is someone drawing breath to add one
  * more clause. Making it generous here is what would make every ordinary
  * question feel slow.
+ *
+ * Both windows trimmed down (from 250 / 1600) for a snappier turnaround —
+ * still enough room for a genuine mid-clause breath, just less of it spent
+ * waiting once the thought is actually done.
  */
-const SETTLE_MS = 250
+const SETTLE_MS = 180
 /** ...and this long when the sentence is plainly unfinished. */
-const CONTINUE_MS = 1600
+const CONTINUE_MS = 1300
 /**
  * Nothing is held longer than this in total. A ceiling rather than a timer:
  * without it, someone who ends every clause on "and" could hold a turn open

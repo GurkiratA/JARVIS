@@ -21,12 +21,60 @@ import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
-import { homedir, tmpdir } from 'node:os'
-import { readFileSync, realpathSync } from 'node:fs'
+import { screenServer } from './screen.mjs'
+import { voiceAuthServer, verifySpeaker } from './voiceauth.mjs'
+import { youtubeServer } from './youtube.mjs'
+import { gifsServer } from './gifs.mjs'
+import { imagesServer } from './images.mjs'
+import { webSearchServer } from './websearch.mjs'
+import { homedir, cpus, totalmem, freemem, platform as osPlatform } from 'node:os'
+import { readFileSync, existsSync, createReadStream } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { isAbsolute, join } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
-import { probeUrl, renderPage } from './page.mjs'
+import { renderPage } from './page.mjs'
+import { withinRoots } from './roots.mjs'
+import { filesServer } from './files.mjs'
+
+const execFileAsync = promisify(execFile)
+
+/**
+ * `.env.local`, loaded by hand.
+ *
+ * Vite reads this automatically for the frontend's VITE_* variables; a plain
+ * `node bridge/server.mjs` does none of that on its own. Every bridge-side key
+ * below — YOUTUBE_API_KEY, GIPHY_API_KEY, PEXELS_API_KEY, the Google Search
+ * pair — was documented as "add it to .env.local" and every one of them was
+ * silently ignored, because nothing here ever opened the file. A real shell
+ * export still wins over this: only fills in a key that isn't already set, so
+ * `JARVIS_MODEL=x node bridge/server.mjs` still overrides whatever the file
+ * says, same as it always could.
+ */
+function loadEnvLocal() {
+  const path = join(process.cwd(), '.env.local')
+  if (!existsSync(path)) return
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eq = trimmed.indexOf('=')
+    if (eq === -1) continue
+    const key = trimmed.slice(0, eq).trim()
+    let value = trimmed.slice(eq + 1).trim()
+    // The one bit of .env syntax worth honouring: a quoted value can hold a
+    // leading/trailing space or a literal # without it being read as a
+    // comment marker.
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    if (key && !(key in process.env)) process.env[key] = value
+  }
+}
+loadEnvLocal()
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 
@@ -99,10 +147,25 @@ function originAllowed(origin) {
 const ALLOW_WRITES = process.env.JARVIS_ALLOW_WRITES === '1'
 
 /**
- * The orchestrator model. Override with JARVIS_MODEL to trade quality for pace
- * — claude-sonnet-5 is noticeably snappier on camera if Opus feels slow.
+ * A narrower door than ALLOW_WRITES, for exactly one thing: sending, replying
+ * to, and otherwise writing email through the Gmail Zapier connection.
+ * JARVIS_ALLOW_WRITES already covers this (it's a write action like any
+ * other), but turning that on also unlocks shell commands, file writes, and
+ * Chrome clicking/typing — a much bigger blast radius than "let it send
+ * email." This lets that one capability on without the rest.
  */
-const MODEL = process.env.JARVIS_MODEL ?? 'claude-opus-5'
+const ALLOW_EMAIL_WRITES = process.env.JARVIS_ALLOW_EMAIL_WRITES === '1' || ALLOW_WRITES
+
+/** Gmail's own selected_api id on Zapier-MCP — confirmed via
+ *  inspect_zapier_actions, not guessed (Gmail is GoogleMailV2CLIAPI, not the
+ *  more obvious-looking GmailCLIAPI). */
+const GMAIL_SELECTED_API = 'GoogleMailV2CLIAPI'
+
+/**
+ * The orchestrator model. Override with JARVIS_MODEL to trade pace for quality
+ * — claude-opus-5 reasons better but noticeably slower on camera than Sonnet.
+ */
+const MODEL = process.env.JARVIS_MODEL ?? 'claude-sonnet-5'
 
 /**
  * How hard the model thinks before answering.
@@ -113,13 +176,14 @@ const MODEL = process.env.JARVIS_MODEL ?? 'claude-opus-5'
  * cross-referencing, no second look. On a model of this tier that is leaving
  * most of it on the table.
  *
- * 'medium' is the compromise worth having here. It reasons and reaches for
- * tools noticeably more than 'low' while still answering inside the window a
- * spoken conversation tolerates. Raise it to 'high' or 'xhigh' when quality
- * matters more than pace; drop back to 'low' when filming and every second of
- * dead air shows.
+ * 'medium' was the compromise worth having by default — reasoning and
+ * reaching for tools noticeably more than 'low' while still answering inside
+ * the window a spoken conversation tolerates. Moved back to 'low' because
+ * pace won out: every second of dead air between the question and the first
+ * word back is more noticeable in conversation than the extra thoroughness.
+ * Raise it with JARVIS_EFFORT=medium/high/xhigh when quality matters more.
  */
-const EFFORT = process.env.JARVIS_EFFORT ?? 'medium'
+const EFFORT = process.env.JARVIS_EFFORT ?? 'low'
 
 /**
  * Both spellings of every renamed built-in are listed on purpose. The SDK
@@ -252,12 +316,47 @@ const VETO_EXEMPT = new Set([
   'openrouter__send-feedback',
 ])
 
-function decideTool(name) {
+/**
+ * `execute_zapier_read_action` has "read" right in the name — but not as a
+ * recognised PREFIX, which is all READ_VERB checks, so by that rule alone it
+ * fell to the write branch and was silently withheld even though its entire
+ * job is looking something up. This is the one Zapier tool name that needed
+ * naming explicitly rather than patched into the regex, since the mismatch is
+ * specific to this one product's naming, not a pattern worth generalising —
+ * every other Zapier tool (list_*, get_*, execute_zapier_write_action,
+ * enable_*, create_*, ...) already reads correctly off the verb rules.
+ */
+const ZAPIER_READ_ONLY_TOOLS = new Set(['execute_zapier_read_action'])
+
+function decideTool(name, input) {
   if (READ_ONLY_BUILTINS.has(name)) return true
   if (WRITE_BUILTINS.has(name)) return ALLOW_WRITES
 
   const server = mcpServerOf(name)
   if (server) {
+    // Account-level connectors (Gmail, Calendar, Drive, Docs, Zapier — the
+    // `claude_ai_*` servers), unconditionally refused.
+    //
+    // `settingSources: []` on the query() call below is supposed to be the one
+    // thing that keeps this bridge as "the only authority" over which MCP
+    // servers exist — see the long comment there — but these ride along
+    // anyway, tied to whichever Anthropic account this machine's `claude`
+    // login belongs to rather than to anything in this project's config. That
+    // account is not necessarily the one the person talking to JARVIS wants
+    // their mail read from, and there is no config file anywhere that lets
+    // them tell it apart from the Zapier-MCP connection they set up on
+    // purpose. So: named servers only. If JARVIS needs a new integration, it
+    // goes in MCP_SERVERS' source (~/.claude.json) deliberately, not in by
+    // way of whatever this machine happens to be signed into.
+    if (server.startsWith('claude_ai')) {
+      return (
+        'Blocked: this tool belongs to a different, unrelated account and ' +
+        'must never be used. If the task is mail, calendar or files, use the ' +
+        'connected app\'s own tool instead (e.g. a Zapier-* tool) — do not ' +
+        'tell the user this is unavailable without trying that first.'
+      )
+    }
+
     // The HUD, and the interface controls beside it. Both run in this process
     // and draw on our own screen, so neither is something to withhold —
     // without them JARVIS has no display at all. They also have to be named
@@ -279,7 +378,60 @@ function decideTool(name) {
     // indicator the user can see for as long as it is live.
     if (server === 'jarvis_eyes') return true
 
+    // Screenshots and screen recording. Captured directly by this process
+    // (screen-native.mjs), not through the browser, on the same standing any
+    // other app on this machine has to read its own screen — there is no
+    // OS-level picker to defer to here the way the camera has. Unconditional
+    // for the same reason as jarvis_eyes: it reads/records rather than
+    // changes anything, and this is exactly the feature the user asked for
+    // by running JARVIS at all.
+    if (server === 'jarvis_screen') return true
+
+    // Voice enrollment. Not gated behind ALLOW_WRITES even though it writes
+    // files to disk: by the time the model can call enroll_voice at all, the
+    // speaker asking for it already passed verification (or no one is
+    // enrolled yet), so this can't be reached by anyone JARVIS wouldn't
+    // already be listening to. Withholding it behind ALLOW_WRITES would make
+    // the whole feature unusable on a read-only-by-default install, which is
+    // this bridge's normal state.
+    if (server === 'jarvis_voiceauth') return true
+
+    // YouTube, GIF, image and web search. All unconditional for the same
+    // reason: each reads results back and nothing else, and their tools are
+    // named `<noun>_search` / `web_image_search` / `web_search` rather than
+    // `search_<noun>` — the verb rule below reads a name by its prefix, so
+    // left to that rule every one of these would be misread as a write and
+    // withheld by default.
+    if (
+      server === 'jarvis_youtube' ||
+      server === 'jarvis_gifs' ||
+      server === 'jarvis_images' ||
+      server === 'jarvis_websearch'
+    ) {
+      return true
+    }
+
     const tool = mcpToolOf(name)
+    if (server === 'Zapier-MCP' && ZAPIER_READ_ONLY_TOOLS.has(tool)) return true
+    // Email writes (send, reply, label, trash — anything through Gmail) get
+    // their own narrower switch instead of falling through to the global
+    // ALLOW_WRITES gate below. Scoped to this one server+tool+app triple:
+    // input is only known here, at the real permission check, not at the
+    // earlier announce-badge call site — that one falls through to the
+    // generic gate below, which is fine, see settleTool's late-badge path.
+    if (
+      server === 'Zapier-MCP' &&
+      tool === 'execute_zapier_write_action' &&
+      ALLOW_EMAIL_WRITES &&
+      // The model reliably sends `tool_name` (e.g. "gmail_send_email") on
+      // these calls — checked live. `selected_api` is in the tool's own
+      // declared schema as required, but in practice the model omits it and
+      // the call still routes correctly off tool_name alone, so that's
+      // checked too, as a second signal, not the only one.
+      (input?.selected_api === GMAIL_SELECTED_API || String(input?.tool_name ?? '').startsWith('gmail_'))
+    ) {
+      return true
+    }
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
       return ALLOW_WRITES
     }
@@ -357,9 +509,26 @@ The blades — the ONLY surface:
   resized, scrolled or thrown full screen — by hand or by mouse. So a second
   blade does not destroy the first, and a long article is meant to be read in
   place rather than summarised away.
+- You can place one too: \`blade\`'s \`position\` (or \`move_blade\` for one
+  already open) puts it left, right, top, bottom or centre instead of the
+  default stack. "Split screen this and that" means one to "left" and one to
+  "right" — size both no larger than "compact" or they overlap.
 - A browser tab is NOT a way of showing something. If you used the browser to
   reach a page, bring it back: open it as a blade, or take a screenshot and put
   that on a blade. The user is looking at this interface, not at Chrome.
+- Files already on this machine — a photo, a video, a document — are yours to
+  find and show. \`list_files\` browses a folder, \`find_files\` finds something
+  by name ("find my resume", "what's in my Pictures folder"). \`list_files\`
+  does NOT recurse — a folder in its results is a folder, not the file you
+  want, so list that folder next rather than stopping there. A path either
+  tool returns opens as a blade (kind "image" or "video") exactly like one
+  from the web.
+- None of this ever needs write access — listing, finding and opening
+  (showing) a file are all reads. ALLOW_WRITES only gates actions that change
+  something on disk or in the world, and nothing here does that. If a blade
+  call is refused, the reason is never "read-only mode" — that message means
+  something else entirely was attempted. Just call \`blade\` with the path;
+  do not decide in advance that it will be blocked.
 - Use \`probe_url\` when you are not certain what a URL is. Never decide from the
   file extension: image CDNs serve pictures from URLs with no extension, and a
   link that looks like a video is usually a page about one. Guessing wrong puts
@@ -367,6 +536,11 @@ The blades — the ONLY surface:
 - An article opens in reading mode by default, which works even on sites that
   refuse to be embedded. Choose the live page when the layout carries the
   meaning — a dashboard, a chart, a profile, a table.
+- Asked to play a song, a video, or something from a named channel rather than
+  a link — "put some music on", "play the trailer for that film", "play the
+  latest video from [channel]" — call \`youtube_search\` first (it takes a
+  \`channel\` name directly), then open the best hit as a blade (kind
+  "embed"). Never guess a watch URL yourself.
 - Never read a blade aloud. Say what it means and let them look.
 
 The interface itself:
@@ -389,12 +563,21 @@ browser or a web page:
   everything they use, it carries their real cookies, and it does not read as
   automation to the sites it visits.
 - This is the FIRST thing you reach for on any browsing task: opening a page,
-  reading one, searching a site, checking mail, a dashboard, a profile, an
-  account, anything behind a login. Do not weigh it up against the
-  alternatives — start here.
+  reading one, searching a site, a dashboard, a profile, an account, anything
+  behind a login that has no dedicated tool of its own. Do not weigh it up
+  against the alternatives — start here.
+- Exception: mail, calendar and files. If a Gmail / Calendar / Drive tool is
+  connected (see below), use THAT, not Chrome — it works whether or not the
+  Chrome extension is even running, which the connected app does not depend on.
+  Only fall back to opening Gmail in Chrome if no such tool exists.
 - But Chrome is your HANDS, not your display. Use it to reach and read things;
   then show what you found on a blade. Leaving the answer in a browser tab is
   not showing it — they are looking at this interface.
+- Exception to THAT: they explicitly asked to open a tab or search "in the
+  browser" / "on Chrome". Then the open tab IS the answer — that is what they
+  asked for — so leave it showing rather than also blading a summary of it.
+  \`chrome_navigate\` straight to a search URL (e.g.
+  https://www.google.com/search?q=...) does this; no tab needs opening first.
 - NEVER use playwright, puppeteer, or any other browser automation server for
   this. They start from an empty profile with no session and a fingerprint that
   the sites worth visiting refuse on sight, so they land on a login wall or a
@@ -425,6 +608,52 @@ Your eyes:
   will see it. Curiosity is not a reason.
 - Describe a watch as a sequence — what changed between the frames — not as a
   list of pictures. They know what their own hands look like.
+
+Voice authentication:
+- \`enroll_voice\` learns a voice from ~20 seconds of them talking.
+  \`list_voice_profiles\` says who's enrolled. \`revoke_voice\` removes someone.
+- The first-ever enrollment needs no asking — that's the owner setting this up.
+- A second or later enrollment is a real decision: confirm with the owner
+  before adding someone else's voice, unless they already named the person and
+  asked outright. See enroll_voice's own description for why this is a
+  courtesy rather than something enforced elsewhere.
+- Once anyone is enrolled, an unrecognized voice never reaches you at all — it
+  is dropped before transcription, the same as silence. You will never be
+  asked to react to "someone I don't recognize spoke"; that case is invisible
+  to you by design.
+
+Mail, calendar and files, via Zapier-MCP, when connected:
+- These do NOT show up as tools named "send email" or "find event" — Zapier
+  exposes one generic mechanism for every app it has enabled: call
+  \`inspect_zapier_actions\` with no arguments first to see what is enabled
+  and get each one's exact \`tool_name\` and parameter schema, then call
+  \`execute_zapier_read_action\` (mail, calendar, files — anything that only
+  looks) or \`execute_zapier_write_action\` (sending, creating, deleting) with
+  that \`tool_name\` and the params it described. \`inspect_zapier_actions\`
+  again with \`tool_name\`/\`params\` set resolves a dynamic enum — a specific
+  label id, a specific calendar — before you execute.
+- Reach for this the moment the task is "check my mail", "what's on my
+  calendar", "find that file" — exactly as readily as a web search, and
+  BEFORE Chrome: it does not depend on the browser extension being connected,
+  and it is silent to the user, where a Chrome tab visibly opens and steals
+  their screen for something they only asked to hear about.
+- If \`inspect_zapier_actions\` shows nothing relevant enabled, say so in one
+  sentence rather than falling back to Chrome or a claude_ai_* tool — those
+  read a different person's account and must never be used for this.
+- Reading is free: list mail, read an event, find a file, all without asking
+  first. Put what you found on a blade rather than reading a long list aloud —
+  a subject line and sender per row is a glance; read out loud it is a wall of
+  words nobody asked to hear in full.
+- Sending, replying, deleting or creating an event is not free: say in one
+  plain sentence what you are about to do and to whom before you do it, the
+  same rule as anything else that leaves this machine.
+- If nothing is connected yet, or a call fails because it is not, say so once
+  in plain words and carry on — this is a "not set up," not a "broken."
+- Email writes (Gmail, through execute_zapier_write_action) have their own
+  narrower permission, separate from every other write action — it can be on
+  even while shell/file/Chrome writes stay off, and vice versa. If a Gmail
+  write is refused, say plainly that email sending is off on this machine,
+  not that writes in general are off.
 
 Using tools:
 - You have real tools on this machine. Use them rather than guessing.
@@ -460,11 +689,11 @@ function elevenKey() {
 const VOICE_ID = process.env.JARVIS_VOICE_ID ?? 'HVls8FPCdrYsty3uUV9E'
 
 /**
- * Where /file is permitted to read from, and how big a read may get.
+ * What /file is permitted to read, and how big a read may get.
  *
- * The roots are realpath'd once at boot so the containment check below compares
- * like with like — on macOS os.tmpdir() is a symlink into /private/var, and a
- * string prefix test against the unresolved form would reject every screenshot.
+ * The roots themselves (where "permitted" means) live in roots.mjs, shared
+ * with files.mjs's browsing and search — one definition rather than two that
+ * can drift apart.
  */
 const IMAGE_TYPES = {
   '.png': 'image/png',
@@ -477,33 +706,25 @@ const IMAGE_TYPES = {
   // to open the agent socket. A picture is not worth that.
 }
 
+const VIDEO_TYPES = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska',
+  '.ogv': 'video/ogg',
+}
+
+const SERVABLE_TYPES = { ...IMAGE_TYPES, ...VIDEO_TYPES }
+
 const MAX_FILE_BYTES = 25 * 1024 * 1024
-
-const FILE_ROOTS = [
-  homedir(),
-  // Both temp directories, because on macOS os.tmpdir() is the per-user
-  // $TMPDIR under /var/folders while half the tools that take a screenshot
-  // still write it to /tmp. Dropping one of them loses real panels.
-  tmpdir(),
-  '/tmp',
-  ...(process.env.JARVIS_FILE_ROOTS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
-].map((root) => {
-  try {
-    return realpathSync(root)
-  } catch {
-    return resolvePath(root)
-  }
-})
-
-/** True when `real` sits inside one of the roots, after both are resolved. */
-const withinRoots = (real) =>
-  FILE_ROOTS.some((root) => {
-    const rel = relative(root, real)
-    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
-  })
+/**
+ * Video gets a much higher ceiling than images because it is streamed —
+ * readFile() would have to hold the whole thing in memory at once, which is
+ * exactly what MAX_FILE_BYTES's 25MB was protecting against; createReadStream
+ * never does, so the only real cost of a bigger file is the disk read itself.
+ */
+const MAX_LOCAL_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 
@@ -641,6 +862,86 @@ async function proxyRemote(req, res, cors, { kinds, maxBytes, timeoutMs, ranged 
 // ---------------------------------------------------------------------------
 
 /**
+ * Machine telemetry for the HUD's status readout — CPU, RAM, and the Wi-Fi
+ * this machine is on. All of it stays local: it answers only the browser tab
+ * that is already trusted to drive the agent, over the same origin check as
+ * everything else on this server.
+ */
+
+/** One snapshot of each core's time buckets, for differencing against a later
+ *  one. os.loadavg() is always [0,0,0] on Windows, so this is the portable way
+ *  to get a real CPU percentage rather than a Unix-only shortcut. */
+function cpuSnapshot() {
+  return cpus().map((c) => {
+    const { user, nice, sys, idle, irq } = c.times
+    return { idle, total: user + nice + sys + idle + irq }
+  })
+}
+
+/** Percent busy across all cores, sampled over a short window. The window has
+ *  to be long enough to see real work happen and short enough that polling it
+ *  every few seconds doesn't itself become the load. */
+async function cpuPercent() {
+  const before = cpuSnapshot()
+  await new Promise((r) => setTimeout(r, 150))
+  const after = cpuSnapshot()
+  let idleDelta = 0
+  let totalDelta = 0
+  for (let i = 0; i < before.length; i++) {
+    idleDelta += after[i].idle - before[i].idle
+    totalDelta += after[i].total - before[i].total
+  }
+  if (totalDelta <= 0) return 0
+  return Math.round((1 - idleDelta / totalDelta) * 100)
+}
+
+function ramPercent() {
+  const total = totalmem()
+  const used = total - freemem()
+  return Math.round((used / total) * 100)
+}
+
+/**
+ * The Wi-Fi network name and negotiated link rate.
+ *
+ * Windows only for now — `netsh` is the one thing every Windows box has, and
+ * this bridge's other platform-specific paths (start.mjs's WASM vendoring,
+ * the voice stack) already assume this environment. Anywhere else, or with no
+ * Wi-Fi adapter, this simply reports nothing rather than guessing.
+ *
+ * Cached briefly: shelling out on every poll is wasteful, and the network
+ * name does not change fast enough to need it.
+ */
+let wifiCache = { at: 0, ssid: null, linkMbps: null }
+const WIFI_CACHE_MS = 4000
+
+async function wifiInfo() {
+  if (Date.now() - wifiCache.at < WIFI_CACHE_MS) return wifiCache
+  let ssid = null
+  let linkMbps = null
+  if (osPlatform() === 'win32') {
+    try {
+      const { stdout } = await execFileAsync(
+        'netsh',
+        ['wlan', 'show', 'interfaces'],
+        { timeout: 2000, windowsHide: true },
+      )
+      // Anchored at the start of the line (after whitespace) so this never
+      // matches the "BSSID" row just above it in the same output.
+      const ssidLine = stdout.match(/^\s*SSID\s*:\s*(.+)$/m)
+      const rateLine = stdout.match(/^\s*Receive rate \(Mbps\)\s*:\s*([\d.]+)/m)
+      if (ssidLine) ssid = ssidLine[1].trim()
+      if (rateLine) linkMbps = Number(rateLine[1])
+    } catch {
+      // No adapter, no `netsh`, or not associated to a network — report
+      // nothing rather than a stale or fabricated reading.
+    }
+  }
+  wifiCache = { at: Date.now(), ssid, linkMbps }
+  return wifiCache
+}
+
+/**
  * CORS, reflected rather than wildcarded.
  *
  * `*` on this origin means any page on the internet can read whatever the
@@ -687,6 +988,23 @@ const handleRequest = async (req, res) => {
     return res.end(JSON.stringify({ ok: true, tts: eleven, stt: eleven }))
   }
 
+  if (req.method === 'GET' && req.url === '/sysinfo') {
+    // The HUD polls this every few seconds for the status readout. cpuPercent
+    // takes ~150ms by design (see the function) — cheap next to the poll
+    // interval, and run alongside the Wi-Fi lookup rather than after it.
+    const [cpu, wifi] = await Promise.all([cpuPercent(), wifiInfo()])
+    res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        ok: true,
+        cpuPercent: cpu,
+        ramPercent: ramPercent(),
+        wifiSSID: wifi.ssid,
+        wifiLinkMbps: wifi.linkMbps,
+      }),
+    )
+  }
+
   // Serve local image files to the page. Screenshots and generated art land on
   // disk as absolute paths, and a page served over http can't read file:// —
   // so the bridge, which can, hands them over.
@@ -704,25 +1022,63 @@ const handleRequest = async (req, res) => {
     }
     const dot = real ? real.lastIndexOf('.') : -1
     const ext = dot === -1 ? '' : real.slice(dot).toLowerCase()
-    // Images only, absolute paths only, and only under roots we expect things
-    // to be written to. This endpoint exists to show pictures, not to be a
-    // general file read for whatever the model — or another page — asks for.
-    if (!real || !Object.hasOwn(IMAGE_TYPES, ext) || !withinRoots(real)) {
+    const contentType = ext ? SERVABLE_TYPES[ext] : undefined
+    // Images and video only, absolute paths only, and only under roots we
+    // expect things to be written to (or, now, browsed with list_files /
+    // find_files in files.mjs — the same withinRoots governs both). This
+    // endpoint exists to show pictures and play clips, not to be a general
+    // file read for whatever the model — or another page — asks for.
+    if (!real || !contentType || !withinRoots(real)) {
       res.writeHead(400, cors)
-      return res.end('images only')
+      return res.end('images or video only')
     }
+    const isVideo = Object.hasOwn(VIDEO_TYPES, ext)
     try {
       const info = await stat(real)
-      if (!info.isFile() || info.size > MAX_FILE_BYTES) {
+      if (!info.isFile() || info.size > (isVideo ? MAX_LOCAL_VIDEO_BYTES : MAX_FILE_BYTES)) {
         res.writeHead(413, cors)
         return res.end('too large')
+      }
+      // Video is streamed rather than read whole, for two reasons: a clip can
+      // be gigabytes where a screenshot never is, and <video> needs Range
+      // support to seek at all — Chrome will not even start playback on a
+      // multi-minute file without it. Images stay a plain buffered read; they
+      // are small and a stream would only add ceremony.
+      if (isVideo) {
+        const range = req.headers.range
+        const m = typeof range === 'string' ? /^bytes=(\d*)-(\d*)$/.exec(range) : null
+        if (m) {
+          const start = m[1] ? Number(m[1]) : 0
+          const end = m[2] ? Number(m[2]) : info.size - 1
+          if (Number.isFinite(start) && Number.isFinite(end) && start <= end && end < info.size) {
+            res.writeHead(206, {
+              ...cors,
+              'content-type': contentType,
+              'content-range': `bytes ${start}-${end}/${info.size}`,
+              'accept-ranges': 'bytes',
+              'content-length': String(end - start + 1),
+              'x-content-type-options': 'nosniff',
+            })
+            createReadStream(real, { start, end }).pipe(res)
+            return
+          }
+        }
+        res.writeHead(200, {
+          ...cors,
+          'content-type': contentType,
+          'accept-ranges': 'bytes',
+          'content-length': String(info.size),
+          'x-content-type-options': 'nosniff',
+        })
+        createReadStream(real).pipe(res)
+        return
       }
       // Asynchronous because this process is also pumping the agent's token
       // stream; a synchronous read of a large screenshot stalls the voice.
       const body = await readFile(real)
       res.writeHead(200, {
         ...cors,
-        'content-type': IMAGE_TYPES[ext],
+        'content-type': contentType,
         'x-content-type-options': 'nosniff',
       })
       return res.end(body)
@@ -924,6 +1280,27 @@ const handleRequest = async (req, res) => {
       return res.end(JSON.stringify({ text: '' }))
     }
 
+    const audio = Buffer.concat(chunks)
+
+    // Voice authentication (voiceauth.mjs). A no-op — resolves authorized
+    // instantly — until someone is actually enrolled; see there for why the
+    // gate belongs here rather than as an MCP tool's own business. An
+    // unrecognized voice is dropped exactly like silence above: nothing is
+    // sent back for the frontend to act on, so JARVIS simply never answers
+    // rather than announcing that it heard someone it doesn't know.
+    try {
+      const verdict = await verifySpeaker(audio)
+      if (verdict.gated && !verdict.authorized) {
+        console.log('[jarvis] voice auth: unrecognized speaker, dropped')
+        res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ text: '' }))
+      }
+    } catch (err) {
+      // A broken verifier should never be why the owner's own voice stops
+      // working — fail open and let the turn through.
+      console.error('[jarvis] voice auth check failed, letting the turn through:', err?.message ?? err)
+    }
+
     try {
       // The filename extension is the only hint Scribe gets about the codec, so
       // derive it from the content-type the MediaRecorder reported rather than
@@ -937,11 +1314,7 @@ const handleRequest = async (req, res) => {
             : 'webm'
       const form = new FormData()
       form.append('model_id', 'scribe_v1')
-      form.append(
-        'file',
-        new Blob([Buffer.concat(chunks)], { type }),
-        `speech.${ext}`,
-      )
+      form.append('file', new Blob([audio], { type }), `speech.${ext}`)
 
       const upstream = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
         method: 'POST',
@@ -1008,6 +1381,10 @@ console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
 console.log(
   `[jarvis] writes ${ALLOW_WRITES ? 'ENABLED' : 'disabled'}` +
     (ALLOW_WRITES ? '' : ' — set JARVIS_ALLOW_WRITES=1 to permit shell/file/device actions'),
+)
+console.log(
+  `[jarvis] email writes ${ALLOW_EMAIL_WRITES ? 'ENABLED' : 'disabled'}` +
+    (ALLOW_EMAIL_WRITES ? '' : ' — set JARVIS_ALLOW_EMAIL_WRITES=1 to let JARVIS send/reply/label mail'),
 )
 // Asynchronous, so it lands a beat after the rest of the banner. Worth printing
 // at all because an extension that is simply not running is indistinguishable
@@ -1179,7 +1556,11 @@ wss.on('connection', (socket) => {
     // interface is the interface talking about itself, not work being done for
     // the user, and the badge would be describing the very thing they can see.
     if (name.startsWith('mcp__jarvis_ui__')) return
-    if (decideTool(name)) return sendTurn({ type: 'tool', name })
+    // === true, not a truthy check: decideTool can also return a string (a
+    // deny WITH a specific reason, see the claude_ai_* block above), and a
+    // truthy check would show the "accessing" badge for a call that is about
+    // to be refused.
+    if (decideTool(name) === true) return sendTurn({ type: 'tool', name })
     if (id) heldTools.set(id, name)
   }
 
@@ -1202,6 +1583,10 @@ wss.on('connection', (socket) => {
         jarvis: displayServer(
           (panel) => send({ type: 'panel', panel }),
           (blade) => send({ type: 'blade', blade }),
+          // Reuses the 'ui' channel rather than adding a new frame type — the
+          // browser already has one place that dispatches out-of-band ops.
+          (id, position) => send({ type: 'ui', op: 'move', args: { id, position } }),
+          (id) => send({ type: 'ui', op: 'close', args: { id } }),
         ),
         // The interface controls, on the same socket. A separate key because
         // MCP tool names are `mcp__<key>__<tool>` and one key can only carry
@@ -1214,6 +1599,24 @@ wss.on('connection', (socket) => {
         jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }),
         // The camera, which unlike everything else here has to ask and wait.
         jarvis_eyes: visionServer(ask),
+        // Screenshots and screen recording — captured directly by this
+        // process (see screen-native.mjs), not through the browser, so this
+        // only needs a one-way push for the on-screen status banner.
+        jarvis_screen: screenServer((status) => send({ type: 'ui', op: 'screen-status', args: { status } })),
+        // Voice enrollment. Verification itself runs in the /stt handler,
+        // not here — this is only the ask/reply channel for recording a
+        // fresh enrollment clip from the browser's microphone.
+        jarvis_voiceauth: voiceAuthServer(ask),
+        // Finds a video, song or channel by name so `blade` has a URL to
+        // open. No per-connection state either, same as jarvis_chrome.
+        jarvis_youtube: youtubeServer(),
+        // GIFs and real photographs by subject, same reasoning.
+        jarvis_gifs: gifsServer(),
+        jarvis_images: imagesServer(),
+        // Local file browsing and search — read-only, same roots as /file.
+        jarvis_files: filesServer(),
+        // General web research — see websearch.mjs for why this exists.
+        jarvis_websearch: webSearchServer(),
       },
       // A plain system prompt, not the claude_code preset. The preset is
       // tuned for a coding agent — verbose, file-oriented, and a large chunk
@@ -1261,8 +1664,13 @@ wss.on('connection', (socket) => {
       // through a `Bash: echo hello` without asking, and only reaches us for
       // something with a consequence, like a `touch`. So a deny here is
       // reliable; an absence of a call here is not proof nothing ran.
-      canUseTool: async (toolName) => {
-        const ok = decideTool(toolName)
+      canUseTool: async (toolName, input) => {
+        // A string means "denied, and here specifically is why" — the
+        // account-connector block below is the one case so far with a reason
+        // that isn't "write access is off," and lumping it into the same
+        // generic message told the model (and so the user) something false.
+        const verdict = decideTool(toolName, input)
+        const ok = verdict === true
         console.log(`[jarvis] tool ${toolName} -> ${ok ? 'allow' : 'deny'}`)
         return ok
           ? { behavior: 'allow' }
@@ -1271,9 +1679,11 @@ wss.on('connection', (socket) => {
               // Every word of this can end up spoken, so it carries no command
               // to read out — the persona is forbidden from saying one aloud.
               message:
-                'Blocked: JARVIS is running in read-only mode and cannot take' +
-                ' actions that change anything. Tell the user this action is' +
-                ' unavailable until they enable write access on the machine.',
+                typeof verdict === 'string'
+                  ? verdict
+                  : 'Blocked: JARVIS is running in read-only mode and cannot take' +
+                    ' actions that change anything. Tell the user this action is' +
+                    ' unavailable until they enable write access on the machine.',
             }
       },
     },

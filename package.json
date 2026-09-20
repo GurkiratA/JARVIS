@@ -10,7 +10,6 @@
   },
   "scripts": {
     "start": "node scripts/start.mjs",
-    "start:writes": "node scripts/start.mjs --writes",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
@@ -29,8 +28,10 @@
     "@react-three/fiber": "^9.7.0",
     "@react-three/postprocessing": "^3.0.4",
     "dompurify": "^3.4.12",
+    "ffmpeg-static": "^5.3.0",
     "framer-motion": "^12.43.0",
     "kokoro-js": "^1.2.1",
+    "onnxruntime-node": "^1.30.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "three": "^0.185.1",
@@ -50,5 +51,10 @@
     "tsx": "^4.23.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
+  },
+  "allowScripts": {
+    "ffmpeg-static@5.3.0": true,
+    "onnxruntime-node@1.21.0": true,
+    "onnxruntime-node@1.30.0": true
   }
 }

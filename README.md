@@ -76,9 +76,6 @@ open http://localhost:5173
 ```
 
 Click **INITIALISE**, allow the microphone when asked, and say **"Hey Jarvis"**.
-You can also start him by saying **"Hey Jarvis"** or clapping at the ignition
-screen — once the microphone has been granted, the button is only one of the
-three ways in.
 
 > It has to be a real browser window. Embedded preview panes block the
 > microphone, so JARVIS will look perfectly alive and simply never respond.
@@ -274,8 +271,7 @@ To allow effectful tools (phone, browser driving, sending), run the bridge this
 way instead:
 
 ```bash
-npm run bridge:writes   # bridge only
-npm run start:writes    # or both processes together
+npm run bridge:writes
 ```
 
 > Read `decideTool()` before you do. *"Hey Jarvis, clean up my downloads folder"*

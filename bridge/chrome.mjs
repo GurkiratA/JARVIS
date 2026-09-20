@@ -2,7 +2,8 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { createConnection } from 'node:net'
 import { readdir, stat } from 'node:fs/promises'
-import { userInfo } from 'node:os'
+import { existsSync } from 'node:fs'
+import { userInfo, platform } from 'node:os'
 import { join } from 'node:path'
 
 /**
@@ -56,6 +57,19 @@ import { join } from 'node:path'
 const SOCKET_DIR = `/tmp/claude-mcp-browser-bridge-${userInfo().username}`
 
 /**
+ * Windows has no Unix domain sockets, so the native host listens on a named
+ * pipe instead — Node's net.createConnection accepts that path string exactly
+ * the way it accepts a Unix socket path, so nothing else here has to know the
+ * difference. Confirmed empirically (there is no public spec for this): one
+ * fixed pipe per user, `claude-mcp-browser-bridge-<username>`, no per-PID
+ * suffix the way the Unix socket directory has one — Chrome's native
+ * messaging host model is one process per browser, not per invocation, so a
+ * stable name is enough on this platform.
+ */
+const IS_WINDOWS = platform() === 'win32'
+const WINDOWS_PIPE_PATH = String.raw`\\.\pipe\claude-mcp-browser-bridge-${userInfo().username}`
+
+/**
  * How long a single browser action may take.
  *
  * Generous because these are real page loads on a real network, and the failure
@@ -82,6 +96,11 @@ const CONNECT_TIMEOUT_MS = 3_000
  * accepted as a last resort, because on some setups it is all there is.
  */
 async function findSocket() {
+  if (IS_WINDOWS) {
+    // One fixed name, so existence is the whole question — no directory of
+    // candidates to rank the way the Unix case needs.
+    return existsSync(WINDOWS_PIPE_PATH) ? WINDOWS_PIPE_PATH : null
+  }
   let names
   try {
     names = await readdir(SOCKET_DIR)
@@ -247,7 +266,7 @@ class ChromeLink {
       const message = { method: 'execute_tool', params: { tool: name, args: args ?? {} } }
       try {
         return await this.request(message)
-      } catch (err) {
+      } catch {
         this.reset()
         return await this.request(message)
       }
@@ -532,8 +551,13 @@ signed in — mail, calendar, dashboards, anything behind a login. That is the
 whole reason to use this rather than fetching a page yourself.
 
 Use it when the answer lives behind a login, when a page has to be *seen*, or
-when the user says to open something. For a public page you only need to read,
-searching or fetching is faster and does not disturb what is on their screen.
+when the user says to open something. For a public page you only need to
+read, \`web_search\` is faster and does not disturb what is on their screen —
+UNLESS they specifically asked to open a tab or search "on" the browser, which
+means they want to see it happen, not just hear the answer. In that case
+navigate straight to a search URL, e.g.
+https://www.google.com/search?q=<their query>, exactly as you would any other
+page. No tab is needed first — passing no tabId opens one automatically.
 
 Opening a page is visible to the user — a tab appears and loads in front of
 them. Do not open things speculatively.`

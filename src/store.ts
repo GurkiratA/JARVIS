@@ -50,7 +50,14 @@ export type Blade = {
   mode?: 'reader' | 'live'
   size: 'compact' | 'tall' | 'wide' | 'full'
   hold: 'turn' | 'sticky'
+  /** Where JARVIS has placed it on screen, on top of whatever the user has
+   *  dragged it to by hand. 'default' is the ordinary centred stack — the
+   *  rest are how "split screen", "put it on the left", "move it up" happen
+   *  on command rather than only by hand or mouse. */
+  position: BladePosition
 }
+
+export type BladePosition = 'default' | 'left' | 'right' | 'center' | 'top' | 'bottom'
 
 export type Turn = {
   id: string
@@ -228,6 +235,15 @@ type State = {
   /** Set while JARVIS is taking a look, to whatever he said he was looking for.
    *  null when he is not. The camera light is on either way — this says why. */
   looking: string | null
+  /** Set while a screen share/recording is live, to what's happening
+   *  ("taking a screenshot", "recording"). null when neither is. Chrome's own
+   *  "sharing your screen" banner is the hardware indicator here — this is
+   *  why, same relationship as `looking` has to the camera light. */
+  screenStatus: string | null
+  /** Set to a person's name while their voice is being enrolled for
+   *  authentication, null otherwise — the on-screen half of "JARVIS is
+   *  recording you right now" while the mic light is the hardware half. */
+  voiceEnrollStatus: string | null
   /** Transient status line during boot, e.g. the voice model download. */
   bootNote: string
   /** Cards currently on the display, newest last. */
@@ -244,12 +260,17 @@ type State = {
   setVoice: (v: string) => void
   setGestures: (on: boolean) => void
   setLooking: (why: string | null) => void
+  setScreenStatus: (what: string | null) => void
+  setVoiceEnrollStatus: (who: string | null) => void
   setBootNote: (n: string) => void
   pushPanel: (p: Panel) => void
   clearPanels: () => void
   pushBlade: (b: Blade) => void
   closeBlade: (id: string) => void
   clearBlades: () => void
+  /** null id means "the one the user is looking at" — the focused blade, or
+   *  the newest if nothing is focused. See moveBlade in App.tsx's watchUi. */
+  moveBlade: (id: string | null, position: BladePosition) => void
   focusBlade: (id: string | null) => void
   expandBlade: (id: string | null) => void
   setPhase: (p: Phase) => void
@@ -281,6 +302,8 @@ export const useStore = create<State>((set) => ({
   voice: '',
   gestures: false,
   looking: null,
+  screenStatus: null,
+  voiceEnrollStatus: null,
   panels: [],
   blades: [],
   focusedBlade: null,
@@ -291,6 +314,8 @@ export const useStore = create<State>((set) => ({
   setVoice: (voice) => set({ voice }),
   setGestures: (gestures) => set({ gestures }),
   setLooking: (looking) => set({ looking }),
+  setScreenStatus: (screenStatus) => set({ screenStatus }),
+  setVoiceEnrollStatus: (voiceEnrollStatus) => set({ voiceEnrollStatus }),
   setBootNote: (bootNote) => set({ bootNote }),
   // Three is as many as fits around the reactor without crowding it. Sticky
   // panels are exempt from the cull — the tool description promises they stay
@@ -320,11 +345,15 @@ export const useStore = create<State>((set) => ({
    */
   pushBlade: (blade) =>
     set((s) => {
-      const next = [...s.blades.filter((b) => b.id !== blade.id), blade].slice(-6)
+      // Defensive default, not load-bearing: the bridge always sets one, but
+      // a blade with no position should still render at the ordinary spot
+      // rather than crash on an undefined class name.
+      const withPosition: Blade = { ...blade, position: blade.position ?? 'default' }
+      const next = [...s.blades.filter((b) => b.id !== withPosition.id), withPosition].slice(-6)
       // A new blade comes to the front. Leaving the old focus in place would
       // open something the user asked for and then hide it behind what they
       // were looking at before.
-      return { blades: next, focusedBlade: blade.id }
+      return { blades: next, focusedBlade: withPosition.id }
     }),
   closeBlade: (id) =>
     set((s) => ({
@@ -332,6 +361,14 @@ export const useStore = create<State>((set) => ({
       focusedBlade: s.focusedBlade === id ? null : s.focusedBlade,
       expandedBlade: s.expandedBlade === id ? null : s.expandedBlade,
     })),
+  moveBlade: (id, position) =>
+    set((s) => {
+      const target = id || s.focusedBlade || s.blades[s.blades.length - 1]?.id
+      if (!target) return {}
+      return {
+        blades: s.blades.map((b) => (b.id === target ? { ...b, position } : b)),
+      }
+    }),
   // Same contract as panels: 'turn' blades go when the user speaks again,
   // 'sticky' ones stay until something replaces them.
   clearBlades: () =>

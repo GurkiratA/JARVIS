@@ -1,9 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { useStore, type Blade } from '../store'
+import { useStore, type Blade, type BladePosition } from '../store'
 import { BRIDGE_HTTP_URL } from '../config'
 import { sanitisePanelHtml } from './sanitise'
-import { frameSpan, peaceScroll, pinchCount } from '../lib/hands'
+import { frameSpan, peaceScroll, pinchCount, pinchSpan } from '../lib/hands'
 import * as camera from '../lib/camera'
 
 /**
@@ -41,9 +41,16 @@ import * as camera from '../lib/camera'
  * URLs that happen to start with a slash. Mirrors the test in sanitise.ts and
  * Orbits.tsx — the list of root directories is the sort of thing that should be
  * changed in each place deliberately.
+ *
+ * Two alternatives: a Unix-style absolute path, or a Windows one — drive
+ * letter plus `:\` or `:/`, e.g. `C:\Users\...` or `C:/Users/...`. Without the
+ * second branch this test only ever fired on macOS/Linux, so on Windows a
+ * local video or image path sailed straight past it unrewritten and was
+ * handed to <video>/<img> as a bare `C:\...` string — not a URL the browser
+ * can load at all, so the blade opened and just never showed anything.
  */
 const DISK_PATH =
-  /^\/(Users|home|root|Volumes|Applications|System|Library|private|tmp|var|opt|mnt|media|srv|data)\//
+  /^(?:[A-Za-z]:[\\/]|\/(Users|home|root|Volumes|Applications|System|Library|private|tmp|var|opt|mnt|media|srv|data)\/)/
 
 /** Route a source through the bridge, which is the only origin that can
  *  actually fetch it — and the only one the page CSP will load from. */
@@ -70,6 +77,20 @@ const pageUrl = (url: string, mode: 'reader' | 'live') =>
  * Vimeo will not hand over the media file, so an iframe is the only way to play
  * a result inline, and the trade for that is that the host list does not grow.
  */
+/**
+ * YouTube's embed player checks this against the page that's framing it, and
+ * without it some videos fail to load at all — "Video player configuration
+ * error, Error 153" — rather than degrading gracefully. Cheap to always send.
+ *
+ * Embeds go through plain youtube.com, not youtube-nocookie.com. The
+ * privacy-enhanced nocookie domain is the usual recommendation, but its own
+ * origin-verification handshake is the more commonly reported cause of Error
+ * 153 in practice — switching domain, not just adding this param, is what
+ * actually clears it for videos that hit it.
+ */
+const ytOrigin = () =>
+  typeof window !== 'undefined' ? `&origin=${encodeURIComponent(window.location.origin)}` : ''
+
 function embedUrl(raw: string): string | null {
   let url: URL
   try {
@@ -82,13 +103,20 @@ function embedUrl(raw: string): string | null {
 
   if (host === 'youtube.com' && url.pathname === '/watch') {
     const v = id(url.searchParams.get('v') ?? '')
-    return v && `https://www.youtube-nocookie.com/embed/${v}`
+    return v && `https://www.youtube.com/embed/${v}?enablejsapi=0&autoplay=1${ytOrigin()}`
   }
   if (host === 'youtu.be') {
     const v = id(url.pathname.slice(1))
-    return v && `https://www.youtube-nocookie.com/embed/${v}`
+    return v && `https://www.youtube.com/embed/${v}?enablejsapi=0&autoplay=1${ytOrigin()}`
   }
-  if (host === 'youtube-nocookie.com' && /^\/embed\/[\w-]+/.test(url.pathname)) return url.href
+  if (
+    (host === 'youtube.com' || host === 'youtube-nocookie.com') &&
+    /^\/embed\/[\w-]+/.test(url.pathname)
+  ) {
+    // Already a full embed URL (arrived that way, or was rewritten once
+    // already) — add origin only if it isn't already carrying one.
+    return url.searchParams.has('origin') ? url.href : `${url.href}${url.search ? '&' : '?'}origin=${encodeURIComponent(window.location.origin)}`
+  }
   if (host === 'vimeo.com') {
     const v = url.pathname.split('/').filter(Boolean)[0] ?? ''
     return /^\d+$/.test(v) ? `https://player.vimeo.com/video/${v}` : null
@@ -187,8 +215,16 @@ const Body = memo(function Body({ blade }: { blade: Blade }) {
         // A player genuinely needs scripts and its own origin. Nothing that
         // reaches the room the user is sitting in is granted.
         sandbox="allow-scripts allow-same-origin allow-presentation"
-        allow="accelerometer; encrypted-media; picture-in-picture; fullscreen"
-        referrerPolicy="no-referrer"
+        // autoplay is a Permissions Policy: the ?autoplay=1 in the URL above
+        // does nothing without the iframe also being granted the feature
+        // here — an iframe is denied every such feature by default.
+        allow="accelerometer; autoplay; encrypted-media; picture-in-picture; fullscreen"
+        // No referrerPolicy override here, unlike the article iframe below.
+        // These are YouTube/Vimeo's own trusted embed players (embedUrl()
+        // only ever returns one of three fixed hosts) — every ordinary site
+        // embedding a YouTube video sends a referrer, and suppressing it
+        // entirely was one cause of "Error 153": the player partly relies on
+        // it, alongside the origin param above, to validate the embed.
         allowFullScreen
         title={blade.title}
       />
@@ -202,7 +238,11 @@ const Body = memo(function Body({ blade }: { blade: Blade }) {
         src={viaBridge(blade.url, 'media')}
         controls
         playsInline
-        preload="metadata"
+        autoPlay
+        // metadata-only left the element sitting on a blank grey frame until
+        // someone pressed play by hand — "playing it now" is what JARVIS
+        // actually says, so the video should actually be doing that.
+        preload="auto"
       />
     )
   }
@@ -237,6 +277,23 @@ const Body = memo(function Body({ blade }: { blade: Blade }) {
 
 /* -------------------------------------------------------------------- card */
 
+/**
+ * Where a placed blade sits, as an offset from the centred stack.
+ *
+ * Viewport units rather than pixels so "split screen" holds its shape as the
+ * window resizes, and rather than a fixed left/right slot in the layout so a
+ * placed blade can still be dragged further by hand from wherever this puts
+ * it — position is where it starts, not a rail it is locked to.
+ */
+const POSITION_OFFSET: Record<BladePosition, { x: string; y: string }> = {
+  default: { x: '0px', y: '0px' },
+  center: { x: '0px', y: '0px' },
+  left: { x: '-28vw', y: '0px' },
+  right: { x: '28vw', y: '0px' },
+  top: { x: '0px', y: '-22vh' },
+  bottom: { x: '0px', y: '22vh' },
+}
+
 function Card({
   blade,
   depth,
@@ -261,6 +318,13 @@ function Card({
   const [pos, setPos] = useState({ x: 0, y: 0 })
   const shell = useRef<HTMLDivElement>(null)
   const body = useRef<HTMLDivElement>(null)
+
+  // Anything but 'default' is JARVIS deliberately placing this blade — split
+  // screen, "put it on the left" — rather than it just sitting wherever it
+  // landed in the stack. See the POSITION_OFFSET comment and its use below.
+  const pinned = blade.position !== 'default'
+  const offset = POSITION_OFFSET[blade.position] ?? POSITION_OFFSET.default
+  const moveBlade = useStore((s) => s.moveBlade)
 
   /**
    * Scroll whatever this blade is showing.
@@ -406,20 +470,22 @@ function Card({
   }, [focused])
 
   /**
-   * Frame the blade with both hands to resize it.
+   * Two ways to resize by hand: frame it, or pinch it and pull.
    *
-   * Index up, thumb out, one hand either side — the rectangle people already
-   * mime when they frame a shot. Pull the corners apart and the blade grows;
-   * bring them together and it shrinks; lean toward the camera and it grows
-   * too, because leaning in enlarges everything about the hands including the
-   * gap between them.
+   * Framing — index up, thumb out, one hand either side — is the rectangle
+   * people already mime when they frame a shot, and it collides with nothing
+   * else a hand can do here.
    *
-   * This replaced a two-handed pinch, which read well on paper and collided
-   * badly in practice: a pinch is how you GRAB a blade, so two of them meant
-   * two hands each trying to pick something up while also asking to resize it.
-   * The framing pose collides with nothing, which is most of why it is right.
+   * Pinching with both hands and pulling apart is the more obvious motion —
+   * it is how you would actually pick up the two corners of a photograph —
+   * but it used to collide with grabbing: a pinch is also how you GRAB a
+   * blade, so two hands pinching briefly looked like two separate grabs
+   * fighting over the same object. That collision is what `grab`'s own
+   * `pinchCount() > 1` re-anchor above now absorbs — once a second hand joins
+   * in, any drag in flight freezes instead of lurching — which is what makes
+   * it safe to read the same two-hand pinch as a resize here too.
    *
-   * The measurement arrives as a plain distance; that it means a resize is
+   * Either measurement arrives as a plain distance; that it means a resize is
    * decided here. Only the focused blade, and never while expanded, where the
    * size is the entire point of the state.
    */
@@ -429,7 +495,11 @@ function Card({
     let from: { span: number; w: number; h: number } | null = null
     const tick = () => {
       raf = requestAnimationFrame(tick)
-      const span = frameSpan()
+      // Whichever pose is live. Pinch is checked first — it is the one most
+      // people reach for without being told, so it should win if somehow both
+      // read at once (they cannot in practice: a hand is either pinched or
+      // framing, never both).
+      const span = pinchSpan() ?? frameSpan()
       if (span === null) {
         from = null
         return
@@ -488,11 +558,16 @@ function Card({
       className="bl-slot"
       initial={{ opacity: 0, y: 26, scale: 0.96, filter: 'blur(6px)' }}
       animate={{
-        opacity: expanded || depth === 0 ? 1 : Math.max(0.3, 1 - depth * 0.24),
-        y: expanded ? 0 : depth * -13,
-        x: expanded ? 0 : depth * 15,
-        scale: expanded ? 1 : 1 - depth * 0.035,
-        filter: depth === 0 || expanded ? 'blur(0px)' : `blur(${depth * 0.7}px)`,
+        // A deliberately placed blade (anything but 'default') reads as its
+        // own object, not as a card buried in the stack — so it renders at
+        // full presence regardless of its actual depth. Split screen would
+        // otherwise show one picture dim and blurred a step "behind" the
+        // other, which is not what placing them side by side means.
+        opacity: expanded || pinned || depth === 0 ? 1 : Math.max(0.3, 1 - depth * 0.24),
+        y: expanded ? 0 : `calc(${pinned ? 0 : depth * -13}px + ${offset.y})`,
+        x: expanded ? 0 : `calc(${pinned ? 0 : depth * 15}px + ${offset.x})`,
+        scale: expanded || pinned ? 1 : 1 - depth * 0.035,
+        filter: expanded || pinned || depth === 0 ? 'blur(0px)' : `blur(${depth * 0.7}px)`,
       }}
       exit={{ opacity: 0, y: 18, filter: 'blur(8px)', transition: { duration: 0.28 } }}
       transition={{ type: 'spring', stiffness: 260, damping: 30 }}
@@ -528,13 +603,14 @@ function Card({
           <span className="bl-title">{blade.title}</span>
           <span className="bl-kind">{blade.kind}</span>
           <span className="bl-acts">
-            {(size || pos.x || pos.y) && !expanded && (
+            {(size || pos.x || pos.y || pinned) && !expanded && (
               <button
                 className="bl-btn"
                 onClick={(e) => {
                   e.stopPropagation()
                   setSize(null)
                   setPos({ x: 0, y: 0 })
+                  if (pinned) moveBlade(blade.id, 'default')
                 }}
                 title="Back where it started"
               >

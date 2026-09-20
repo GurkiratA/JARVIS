@@ -100,19 +100,52 @@ body::after {
   opacity: 0.42;
 }
 
+.status-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  /* The header is space-between, so with the wordmark hidden this column
+     would slide to the left edge on its own. Claiming the free space keeps it
+     pinned right whether or not the brand is there — and with both present it
+     changes nothing, since space-between had already used that space up. */
+  margin-left: auto;
+}
+
 .status {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 10px;
-  /* Centred between the wordmark and the clock. `margin-left: auto` alone put
-     it hard against the clock once there were three children in the header. */
-  margin-right: auto;
-  /* The header is space-between, so with the wordmark hidden the status line
-     would slide to the left edge on its own. Claiming the free space keeps it
-     pinned right whether or not the brand is there — and with both present it
-     changes nothing, since space-between had already used that space up. */
-  margin-left: auto;
+}
+
+/* Stacked rather than side by side — the date is a caption, not a second
+   headline, and at clock-time's size a side-by-side layout would either run
+   wide enough to crowd the corner or force the date to match its scale. */
+.clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.clock-date {
+  font-size: 14px;
+  opacity: 0.5;
+  letter-spacing: 0.16em;
+}
+
+.clock-time {
+  font-size: 30px;
+  font-weight: 300;
+  letter-spacing: 0.03em;
+  color: #eafcff;
+  text-shadow: 0 0 20px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+@media (max-width: 1100px) {
+  .clock-time { font-size: 22px; }
 }
 
 .dot {
@@ -149,6 +182,10 @@ body::after {
   letter-spacing: 0.34em;
   margin-bottom: 4px;
 }
+/* A second rail-title stacked under the SYSTEMS list, for the STATUS block —
+   enough space to read as a new section without another rail-title's own
+   margin-bottom doubling up. */
+.rail-title.rail-gap { margin-top: 16px; }
 
 .rail-item {
   display: flex;
@@ -815,8 +852,8 @@ kbd {
 
 .ignition-ring {
   position: absolute;
-  width: 240px;
-  height: 240px;
+  width: 340px;
+  height: 340px;
   border: 1px solid rgba(79, 214, 255, 0.28);
   border-top-color: rgba(79, 214, 255, 0.9);
   border-radius: 50%;
@@ -826,19 +863,21 @@ kbd {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
+  max-width: 300px;
+  text-align: center;
 }
 
 .ignition-word {
-  font-size: 15px;
+  font-size: 20px;
   letter-spacing: 0.52em;
   text-indent: 0.52em; /* balance the trailing letter-space */
   text-shadow: 0 0 30px rgba(79, 214, 255, 0.7);
 }
 
 .ignition-sub {
-  font-size: 9px;
-  letter-spacing: 0.28em;
+  font-size: 12px;
+  letter-spacing: 0.18em;
   opacity: 0.4;
   text-transform: uppercase;
 }
@@ -1898,98 +1937,4 @@ kbd {
   object-fit: cover;
   transform: scaleX(-1);
   background: #000;
-}
-
-
-/* --- clock, status block and frame ------------------------------------- */
-
-.hud-clock {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  text-align: right;
-}
-
-.clock-date {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 8px;
-  letter-spacing: 0.3em;
-  opacity: 0.5;
-  text-transform: uppercase;
-}
-
-.clock-time {
-  font-size: 22px;
-  font-weight: 300;
-  letter-spacing: 0.08em;
-  font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 22px color-mix(in srgb, var(--accent) 60%, transparent);
-  /* A vertical rule, the way the reference frames the time. */
-  padding-left: 14px;
-  border-left: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-}
-
-.sys-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-width: 156px;
-  margin-bottom: 22px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-}
-
-.sys-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  font-size: 8px;
-  letter-spacing: 0.16em;
-}
-
-.sys-key { opacity: 0.45; }
-
-.sys-val {
-  color: var(--accent);
-  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-/* A row that is not live reads as dim rather than coloured, so a dropped link
-   is visible at a glance instead of being another glowing green word. */
-.sys-val-off {
-  color: inherit;
-  opacity: 0.35;
-  text-shadow: none;
-}
-
-/* The faint engineering grid behind everything. Two repeating-linear-gradients
-   rather than an image: no request, no cache, and it re-tints with the accent
-   when JARVIS changes the theme. */
-.hud-grid {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.16;
-  background-image:
-    repeating-linear-gradient(
-      to right,
-      color-mix(in srgb, var(--accent) 22%, transparent) 0 1px,
-      transparent 1px 72px
-    ),
-    repeating-linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--accent) 22%, transparent) 0 1px,
-      transparent 1px 72px
-    );
-  /* Fades out towards the middle so the reactor is never seen through a mesh. */
-  mask-image: radial-gradient(ellipse at center, transparent 34%, black 88%);
-}
-
-@media (max-width: 1100px) {
-  .sys-panel { display: none; }
-  .clock-date { display: none; }
-  .clock-time { font-size: 16px; border-left: 0; padding-left: 0; }
 }

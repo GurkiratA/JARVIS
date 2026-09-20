@@ -219,25 +219,44 @@ export function candidateVoices(): SpeechSynthesisVoice[] {
     .map((x) => x.v)
 }
 
-let cachedVoice: SpeechSynthesisVoice | null | undefined
+/**
+ * The chosen voice, cached by NAME rather than by holding the
+ * SpeechSynthesisVoice object itself.
+ *
+ * This used to cache the object. Some browsers hand back a fresh array of
+ * fresh voice objects on every call to getVoices() — the list is equal in
+ * content but not in identity — so a `u.voice = <object from an earlier
+ * call>` assignment made against a later, different array can silently fail
+ * to match anything internally and the engine falls back to its own default
+ * voice. That is exactly what "the introduction sounds different from
+ * everything after it" is: the first utterance often happens to be spoken
+ * before or right as the voice list settles, whatever object got cached
+ * then goes stale, and every utterance after it quietly speaks in the
+ * browser's default instead of the one this code chose. Re-resolving the
+ * name against a fresh getVoices() call every time is cheap and immune to
+ * the object identity ever changing under it.
+ */
+let cachedVoiceName: string | null | undefined
 
 function pickVoice(): SpeechSynthesisVoice | null {
-  if (cachedVoice !== undefined) return cachedVoice
   const all = speechSynthesis.getVoices()
   if (!all.length) return null // not loaded yet — try again next utterance
 
-  // Honour an explicit choice made with the voice picker. A saved name that no
-  // longer resolves is dropped rather than left to resurrect itself silently
-  // if that voice is ever reinstalled.
-  const saved = localStorage.getItem(VOICE_PREF_KEY)
-  if (saved) {
-    const hit = all.find((v) => v.name === saved)
-    if (hit) return (cachedVoice = hit)
-    localStorage.removeItem(VOICE_PREF_KEY)
+  if (cachedVoiceName === undefined) {
+    // Honour an explicit choice made with the voice picker. A saved name that
+    // no longer resolves is dropped rather than left to resurrect itself
+    // silently if that voice is ever reinstalled.
+    const saved = localStorage.getItem(VOICE_PREF_KEY)
+    if (saved && all.some((v) => v.name === saved)) {
+      cachedVoiceName = saved
+    } else {
+      if (saved) localStorage.removeItem(VOICE_PREF_KEY)
+      cachedVoiceName =
+        candidateVoices()[0]?.name ?? all.find((v) => /^en/i.test(v.lang))?.name ?? null
+    }
   }
 
-  cachedVoice = candidateVoices()[0] ?? all.find((v) => /^en/i.test(v.lang)) ?? null
-  return cachedVoice
+  return cachedVoiceName === null ? null : (all.find((v) => v.name === cachedVoiceName) ?? null)
 }
 
 /** What the HUD should show. Reports the engine actually in use rather than
@@ -260,14 +279,14 @@ export function cycleVoice(): string {
   const i = list.findIndex((v) => v.name === now?.name)
   const next = list[(i + 1) % list.length]
   localStorage.setItem(VOICE_PREF_KEY, next.name)
-  cachedVoice = next
+  cachedVoiceName = next.name
   return next.name
 }
 
 // Voices load asynchronously in Chrome; the first call usually returns nothing.
 if (typeof speechSynthesis !== 'undefined') {
   speechSynthesis.addEventListener('voiceschanged', () => {
-    cachedVoice = undefined
+    cachedVoiceName = undefined
     pickVoice()
   })
   pickVoice()

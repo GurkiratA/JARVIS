@@ -6,7 +6,7 @@ import { BladeSweep, Blades } from './Blades'
 import { Effects } from './Effects'
 import { Pointer } from './Pointer'
 import { GestureGuide } from './GestureGuide'
-import { isConnected } from '../lib/bridge'
+import { BACKEND, BRIDGE_HTTP_URL } from '../config'
 
 const statusText: Record<Phase, string> = {
   offline: 'OFFLINE',
@@ -21,6 +21,126 @@ const statusText: Record<Phase, string> = {
 
 function Corner({ at }: { at: 'tl' | 'tr' | 'bl' | 'br' }) {
   return <div className={`corner corner-${at}`} />
+}
+
+/** The user's own wall clock, ticking live — not a prop, not fetched, just
+ *  `new Date()` read once a second. Nothing about "what time is it" needs a
+ *  round trip. */
+function Clock() {
+  const [now, setNow] = useState(() => new Date())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // 12-hour with AM/PM, not the 24-hour "military" clock — en-US rather than
+  // en-GB specifically for this, since en-GB renders the period as lowercase
+  // "pm" with no space, which reads as a typo at the size this is shown now.
+  const time = now.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  })
+  const date = now
+    .toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' })
+    .toUpperCase()
+
+  return (
+    <div className="clock">
+      <span className="clock-date">{date}</span>
+      <span className="clock-time">{time}</span>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ status */
+
+type SysStats = {
+  cpu: number | null
+  ram: number | null
+  wifi: string | null
+  downMbps: number | null
+}
+
+/** The Network Information API — Chrome/Edge only, and always an estimate
+ *  rather than a measured throughput. That's still a real "internet speed" a
+ *  browser can read without a bandwidth test hammering the network on every
+ *  poll, which is the honest trade for a HUD readout. */
+function readDownlink(): number | null {
+  const conn = (navigator as unknown as { connection?: { downlink?: number } })
+    .connection
+  return typeof conn?.downlink === 'number' ? conn.downlink : null
+}
+
+const SYS_POLL_MS = 4000
+
+/** CPU / RAM / Wi-Fi / link speed, polled from the bridge — the browser has no
+ *  API for any of these, so this is the one HUD readout that only works with
+ *  the bridge backend running. Silently blank without it, same as SYSTEMS. */
+function SystemStatus() {
+  const [stats, setStats] = useState<SysStats>({
+    cpu: null, ram: null, wifi: null, downMbps: readDownlink(),
+  })
+
+  useEffect(() => {
+    let stopped = false
+    const poll = async () => {
+      let cpu: number | null = null
+      let ram: number | null = null
+      let wifi: string | null = null
+      if (BACKEND === 'bridge') {
+        try {
+          const res = await fetch(`${BRIDGE_HTTP_URL}/sysinfo`, {
+            signal: AbortSignal.timeout(3000),
+          })
+          if (res.ok) {
+            const j = (await res.json()) as {
+              cpuPercent?: number
+              ramPercent?: number
+              wifiSSID?: string | null
+            }
+            cpu = typeof j.cpuPercent === 'number' ? j.cpuPercent : null
+            ram = typeof j.ramPercent === 'number' ? j.ramPercent : null
+            wifi = typeof j.wifiSSID === 'string' ? j.wifiSSID : null
+          }
+        } catch {
+          // Bridge down or slow this tick — leave the readout blank rather
+          // than showing a number that's stopped being true.
+        }
+      }
+      if (!stopped) setStats({ cpu, ram, wifi, downMbps: readDownlink() })
+    }
+    void poll()
+    const id = setInterval(poll, SYS_POLL_MS)
+    return () => {
+      stopped = true
+      clearInterval(id)
+    }
+  }, [])
+
+  return (
+    <>
+      <div className="rail-title rail-gap">STATUS</div>
+      <div className="rail-item mono">
+        <span className="tick" />
+        CPU {stats.cpu === null ? '—' : `${stats.cpu}%`}
+      </div>
+      <div className="rail-item mono">
+        <span className="tick" />
+        RAM {stats.ram === null ? '—' : `${stats.ram}%`}
+      </div>
+      <div className="rail-item mono">
+        <span className="tick" />
+        NET {stats.downMbps === null ? '—' : `${stats.downMbps.toFixed(1)} MBPS`}
+      </div>
+      <div className="rail-item mono">
+        <span className="tick" />
+        WIFI {stats.wifi ?? '—'}
+      </div>
+    </>
+  )
 }
 
 /* ------------------------------------------------------------------ decode */
@@ -145,95 +265,6 @@ function DecodeText({ text }: { text: string }) {
   )
 }
 
-/* ------------------------------------------------------------------- clock */
-
-/**
- * The wall clock, ticking on the second.
- *
- * Aligned to the next second boundary rather than set to a flat 1000ms
- * interval: a naive interval drifts by however long the page was busy, and the
- * visible symptom is a minute that flips a second or two after the phone in
- * your hand does. Re-arming against `Date.now() % 1000` puts every tick back on
- * the boundary, so the readout changes when the real minute changes.
- *
- * Deliberately locale-driven — `toLocaleTimeString` gives whoever is standing
- * in front of it their own conventions rather than the author's.
- */
-function useNow(): Date {
-  const [now, setNow] = useState(() => new Date())
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>
-    const tick = () => {
-      setNow(new Date())
-      timer = setTimeout(tick, 1000 - (Date.now() % 1000))
-    }
-    timer = setTimeout(tick, 1000 - (Date.now() % 1000))
-    return () => clearTimeout(timer)
-  }, [])
-  return now
-}
-
-function Clock() {
-  const now = useNow()
-  return (
-    <div className="hud-clock">
-      <div className="clock-date">
-        <span className="clock-day">
-          {now.toLocaleDateString(undefined, { weekday: 'long' })}
-        </span>
-        <span className="clock-md">
-          {now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-        </span>
-      </div>
-      <div className="clock-time">
-        {now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
-      </div>
-    </div>
-  )
-}
-
-/**
- * The status block.
- *
- * Every row is something the page actually knows. There is no CPU or memory
- * readout here and that is not an oversight: a browser cannot see either, so
- * the only way to print them would be to make them up, and a dashboard that
- * invents its own numbers is worse than one that shows four true ones.
- *
- * It shares the clock's tick, which is also what re-polls the socket — the
- * WebSocket's readyState is not something the store hears about, so a link that
- * drops would otherwise keep reading SECURE until the next unrelated render.
- */
-function SystemStatus({
-  phase,
-  servers,
-  voice,
-}: {
-  phase: Phase
-  servers: number
-  voice: string | null
-}) {
-  useNow()
-  const linked = isConnected()
-  const rows: [string, string, boolean][] = [
-    ['POWER CORE', phase === 'offline' ? 'STANDBY' : 'ONLINE', phase !== 'offline'],
-    ['SYSTEMS', `${servers} LINKED`, servers > 0],
-    ['NETWORK', linked ? 'SECURE' : 'DOWN', linked],
-    ['VOICE MODULE', voice ? 'ACTIVE' : 'IDLE', !!voice],
-  ]
-  return (
-    <div className="sys-panel">
-      <div className="rail-title">SYSTEM STATUS</div>
-      {rows.map(([k, v, ok]) => (
-        <div className="sys-row" key={k}>
-          <span className="sys-key">{k}</span>
-          <span className={ok ? 'sys-val' : 'sys-val sys-val-off'}>{v}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 /* --------------------------------------------------------------------- hud */
 
 export function Hud() {
@@ -248,6 +279,8 @@ export function Hud() {
   const bootNote = useStore((s) => s.bootNote)
   const gestures = useStore((s) => s.gestures)
   const looking = useStore((s) => s.looking)
+  const screenStatus = useStore((s) => s.screenStatus)
+  const voiceEnrollStatus = useStore((s) => s.voiceEnrollStatus)
   const ui = useStore((s) => s.ui)
 
   // accentFor folds JARVIS's overrides in over the phase colour, so one
@@ -272,11 +305,6 @@ export function Hud() {
           behind the transcript and the panels without a z-index war. */}
       <BladeSweep />
 
-      {/* The frame the rest of the chrome hangs in. Pointer-events: none and
-          purely decorative — it must never be in front of anything clickable,
-          which is the mistake Ignition.tsx documents at length. */}
-      <div className="hud-grid" aria-hidden="true" />
-
       <Corner at="tl" />
       <Corner at="tr" />
       <Corner at="bl" />
@@ -290,18 +318,19 @@ export function Hud() {
           </div>
         )}
 
-        <div className="status">
-          <span className="dot" />
-          <span className="status-text">
-            {/* bootNote is the voice-model download readout. It is only ever
-                the right thing to show during boot — as a general fallback a
-                note that never got cleared (a stuck 'voice 97%') sits over
-                LISTENING and PROCESSING for the rest of the session. */}
-            {phase === 'boot' && bootNote ? bootNote : statusText[phase]}
-          </span>
+        <div className="status-wrap">
+          <div className="status">
+            <span className="dot" />
+            <span className="status-text">
+              {/* bootNote is the voice-model download readout. It is only ever
+                  the right thing to show during boot — as a general fallback a
+                  note that never got cleared (a stuck 'voice 97%') sits over
+                  LISTENING and PROCESSING for the rest of the session. */}
+              {phase === 'boot' && bootNote ? bootNote : statusText[phase]}
+            </span>
+          </div>
+          <Clock />
         </div>
-
-        <Clock />
       </header>
 
       {/* Left rail: which integrations are live */}
@@ -319,13 +348,12 @@ export function Hud() {
             <span className="tick" />
             Web
           </div>
+          <SystemStatus />
         </aside>
       )}
 
       {/* Right rail: live telemetry, mostly for flavour */}
       <aside className="rail rail-right">
-        <SystemStatus phase={phase} servers={connected.length + 1} voice={voice} />
-
         <div className="rail-title">SIGNAL</div>
         <div className="meter">
           <div className="meter-fill" style={{ height: `${level * 100}%` }} />
@@ -434,6 +462,11 @@ export function Hud() {
           {looking ? `LOOKING — ${looking.toUpperCase()}` : 'CAMERA ON · G TO STOP'}
         </div>
       )}
+      {/* Chrome's own "sharing your screen" browser chrome is the hardware
+          light here — this is the on-screen half of that same transparency,
+          same job the camera banner above does while looking is live. */}
+      {screenStatus && <div className="hands-live">{screenStatus.toUpperCase()}</div>}
+      {voiceEnrollStatus && <div className="hands-live">{voiceEnrollStatus.toUpperCase()}</div>}
       <GestureGuide live={gestures} />
     </div>
   )

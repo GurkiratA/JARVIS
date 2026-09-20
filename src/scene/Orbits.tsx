@@ -28,10 +28,12 @@ import { BRIDGE_HTTP_URL } from '../config'
  * src/ui/Panels.tsx — the two cannot share it without one of them importing a
  * DOM component into the scene or the other way round, and the list of root
  * directories is the sort of thing that should be changed in both places
- * deliberately anyway.
+ * deliberately anyway. The Windows branch (drive letter + `:\` or `:/`) is
+ * needed for the same reason it's needed there — a Windows path never starts
+ * with a slash at all.
  */
 const DISK_PATH =
-  /^\/(Users|home|root|Volumes|Applications|System|Library|private|tmp|var|opt|mnt|media|srv|data)\//
+  /^(?:[A-Za-z]:[\\/]|\/(Users|home|root|Volumes|Applications|System|Library|private|tmp|var|opt|mnt|media|srv|data)\/)/
 
 /**
  * A page served over http cannot load `file:///…`, and everything interesting

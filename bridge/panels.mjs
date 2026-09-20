@@ -45,14 +45,30 @@ styling and the row lands as unformatted text.
   .hud-figure          an image or video with its .hud-caption grouped beneath
 
 PICTURES AND VIDEO — these work. Use them.
+  - Asked to show a picture of something with no better source already in
+    hand: for a generic subject ("a mountain", "a golden retriever") call
+    \`image_search\` — real stock photography, always a working picture. For a
+    SPECIFIC real thing it will not have (a named landmark, a product, a
+    logo) call \`web_image_search\` instead. Try \`image_search\` first when you
+    are not sure which kind the request is; it is the more reliable source.
+  - Asked for a GIF specifically — "send a facepalm gif" — call \`gif_search\`
+    first; it returns a real, working URL. Never invent or guess one.
   - Images from the web render. Image-search results, article thumbnails,
     photographs, product shots, chart images: paste the URL exactly as the tool
     result gave it and it appears. The bridge fetches every remote image
     server-side and hands the bytes to the display, so hosts that refuse to be
     hotlinked still render — nothing is loaded by the page itself.
-  - Images off this machine work the same way: a render you generated, a
-    screenshot you took, any file on disk. Give it as file:///absolute/path or
-    a bare absolute path.
+  - Images AND video off this machine work the same way: a render you
+    generated, a screenshot you took, a photo or clip already on disk. Give it
+    as file:///absolute/path or a bare absolute path — a local video plays in
+    a blade (kind "video") exactly like one from the web.
+  - Don't know the path? \`list_files\` browses a folder, \`find_files\` finds
+    something by name across the home directory — "what's in my Pictures
+    folder", "find that vacation video". \`list_files\` does not recurse — a
+    folder in its results needs listing again, not stopping at. Both tools are
+    scoped to the home directory and temp folders and will not see the rest of
+    the disk — but neither that, nor opening what they find as a blade, needs
+    write access. Nothing here is ever blocked by ALLOW_WRITES.
   - If a search came back with pictures, SHOW the pictures. A row of thumbnails
     down the side of the headlines beats headlines alone, every time — and a
     grid of results is the whole answer to an image search, not a decoration
@@ -64,21 +80,23 @@ PICTURES AND VIDEO — these work. Use them.
     A guessed address is a broken image, and a broken image is worse than none.
 
 WHERE THE CONTENT COMES FROM — read this before showing anything from the web.
-  - Fetch with exa. crawling_exa and web_fetch_exa return the page's actual
-    text and its image URLs; deep_search_exa and web_search_advanced_exa
-    return content alongside the results. That returned content is what you
-    render — rewritten into these classes, in your own words and this interface's
-    shape. You are not linking to an article, you are showing it.
+  - Fetch with web_search. It returns ranked pages — url, title, an excerpt of
+    the relevant text. That excerpt is what you render — rewritten into these
+    classes, in your own words and this interface's shape. You are not
+    linking to an article, you are showing it. Need the whole page rather than
+    an excerpt? \`probe_url\` it, then open it as a blade (kind "article").
   - Do NOT put a bare source URL on screen and leave the page to fetch it for
     itself. Half the web refuses that: news CDNs answer 403 to anything that
     is not their own page, and the panel renders as an empty rectangle. Going
-    through exa is what makes the difference between an article appearing and a
-    blank card.
-  - So: asked about a page, crawl it, then panel the substance — the headline,
-    the two or three lines that matter, the figure, the photograph.
+    through web_search or a blade — never a raw <img>/<iframe> pointed at a
+    page you have not fetched — is what makes the difference between content
+    appearing and a blank card.
+  - So: asked about a page, search or fetch it, then panel the substance — the
+    headline, the two or three lines that matter, the figure, the photograph.
   - Image URLs that came back IN a tool result are real and will render; the
     bridge fetches them server-side. An image URL you inferred or assembled
-    yourself will not. Never guess one.
+    yourself will not. Never guess one — that is what image_search,
+    web_image_search and gif_search are for.
 
 RULES
   - No inline colours. The accent is themed by the 'accent' argument; use the
@@ -253,7 +271,20 @@ from the file extension — image CDNs routinely serve pictures from URLs with n
 extension, and a link that looks like a video is usually a page about one.
 
 Never open a blade the user did not ask for and does not need. One blade that
-answers the question beats three that surround it.`
+answers the question beats three that surround it.
+
+Placing it: \`position\` puts it somewhere other than the default centred
+stack — "put it on the left", "split screen this and that". For a genuine
+split screen, open (or move, with \`move_blade\`) one to "left" and the other
+to "right", and give both a size no bigger than "compact" or they will overlap.
+This response tells you the blade's id — keep it if you may need to move or
+close this specific one later while others are also open.`
+
+const POSITION_NOTE =
+  'Where it sits. "default" is the ordinary centred stack. The rest place it ' +
+  'off to one side for split screen or a deliberate layout: "left"/"right" ' +
+  'side by side, "top"/"bottom" stacked vertically, "center" is the middle ' +
+  'of the screen but not stacked with others the way "default" is.'
 
 const bladeSchema = {
   title: z
@@ -294,7 +325,54 @@ const bladeSchema = {
     .enum(['turn', 'sticky'])
     .optional()
     .catch(undefined)
-    .describe('turn = closes when the user next speaks. sticky = stays until replaced.'),
+    .describe(
+      'turn = closes when the user next speaks. sticky = stays until ' +
+        'replaced or closed — the default for everything except "camera", ' +
+        'which defaults to turn (live hardware; it should stop when the ' +
+        "user moves on, not keep running because nobody said stop). Set it " +
+        'explicitly to override — e.g. turn for something you know is ' +
+        'genuinely one-off and should clear itself.',
+    ),
+  position: z
+    .enum(['default', 'left', 'right', 'center', 'top', 'bottom'])
+    .optional()
+    .catch(undefined)
+    .describe(POSITION_NOTE),
+}
+
+const MOVE_DESCRIPTION = `Move an already-open blade — "put that on the left", "split screen this and the other one", "move it back to the middle".
+
+Takes effect immediately; the blade does not have to be reopened. Omit \`id\`
+to mean whichever blade the user is currently looking at (the front one).
+
+For split screen specifically: move one blade "left" and the other "right".
+If either is large (kind "wide" or "full"), consider also resizing it smaller
+first — this tool only moves, it does not resize.`
+
+const moveSchema = {
+  id: z
+    .string()
+    .optional()
+    .catch(undefined)
+    .describe('The blade id, from when it was opened or last listed. Omit to mean the one the user is currently looking at.'),
+  position: z.enum(['default', 'left', 'right', 'center', 'top', 'bottom']).describe(POSITION_NOTE),
+}
+
+const CLOSE_DESCRIPTION = `Close one open blade — "close that", "get rid of the video", "close the picture on the left".
+
+Blades default to staying open until closed (see \`blade\`'s \`hold\` argument) —
+this is how the user actually gets rid of one. Omit \`id\` to mean whichever
+blade they are currently looking at (the front one). Closing is not the same
+as opening something else over it: only use this when they asked for THIS
+one to go away, not as a way to "clean up" before showing something new —
+opening a new blade never requires closing an old one first, they stack.`
+
+const closeSchema = {
+  id: z
+    .string()
+    .optional()
+    .catch(undefined)
+    .describe('The blade id, from when it was opened or last listed. Omit to mean the one the user is currently looking at.'),
 }
 
 const PROBE_DESCRIPTION = `Find out what is actually at a URL before showing it.
@@ -316,8 +394,12 @@ argument. You know those things. Overrule it whenever you have reason to.`
 /**
  * @param {(panel: object) => void} emit - pushes the panel to the browser
  * @param {(blade: object) => void} emitBlade - pushes a blade to the browser
+ * @param {(id: string, position: string) => void} emitMove - repositions an
+ *   already-open blade by id
+ * @param {(id: string | null) => void} emitClose - closes one open blade by
+ *   id, or the front one if id is omitted
  */
-export function displayServer(emit, emitBlade) {
+export function displayServer(emit, emitBlade, emitMove, emitClose) {
   return createSdkMcpServer({
     name: 'jarvis',
     version: '1.0.0',
@@ -407,10 +489,36 @@ export function displayServer(emit, emitBlade) {
           // anything meant to be looked at. Getting this wrong is the difference
           // between an article you can follow and one in a letterbox.
           size: args.size ?? (kind === 'article' ? 'tall' : 'wide'),
-          hold: args.hold ?? 'turn',
+          // Everything defaults to sticky except the camera. The whole point
+          // of opening a blade is that the user looks at it and keeps talking
+          // — about it, or about something else entirely while it stays up.
+          // "Play a video, then show me a picture" should end with both on
+          // screen, not the video vanishing the moment a new, unrelated turn
+          // starts. Camera is the one exception: it's live hardware with a
+          // light the user can see, and it should turn off when they move on
+          // rather than keep recording indefinitely because nobody said stop.
+          hold: args.hold ?? (kind === 'camera' ? 'turn' : 'sticky'),
+          position: args.position ?? 'default',
         }
         emitBlade(blade)
-        return { content: [{ type: 'text', text: `Open on the blades as "${blade.title}".` }] }
+        return {
+          content: [
+            { type: 'text', text: `Open on the blades as "${blade.title}" (id ${blade.id}).` },
+          ],
+        }
+      }),
+
+      tool('move_blade', MOVE_DESCRIPTION, moveSchema, async (args) => {
+        const position = args.position
+        const id = String(args.id ?? '').trim() || null
+        emitMove(id, position)
+        return ok(id ? `Moved ${id} to ${position}.` : `Moved to ${position}.`)
+      }),
+
+      tool('close_blade', CLOSE_DESCRIPTION, closeSchema, async (args) => {
+        const id = String(args.id ?? '').trim() || null
+        emitClose(id)
+        return ok(id ? `Closed ${id}.` : 'Closed.')
       }),
 
       tool(
@@ -426,4 +534,5 @@ export function displayServer(emit, emitBlade) {
   })
 }
 
+const ok = (text) => ({ content: [{ type: 'text', text }] })
 const refuse = (text) => ({ isError: true, content: [{ type: 'text', text }] })

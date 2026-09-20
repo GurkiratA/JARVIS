@@ -11,8 +11,9 @@ import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
 import { listenForClap } from './lib/clap'
-import { listenForWakeWord } from './lib/wakeword'
+import { listenForWake } from './lib/wake'
 import * as camera from './lib/camera'
+import { recordEnrollment } from './lib/voiceEnroll'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
 import { forTool, attention } from './lib/fillers'
@@ -24,6 +25,7 @@ import {
   watchPanels,
   watchBlades,
   watchCapture,
+  watchVoiceEnroll,
   watchUi,
   watchConnection,
   connectedLabels,
@@ -97,6 +99,33 @@ export default function App() {
   const silence = () => {
     speaker.current?.cancel()
     speaker.current = null
+  }
+
+  /** Turn hand-gesture tracking on or off — shared by the G key and by
+   *  JARVIS's own `ui_hands` tool, so asking out loud does exactly what
+   *  pressing the key does. */
+  const setHands = (on: boolean) => {
+    const already = store.getState().gestures
+    if (on === already) return
+    if (!on) {
+      hands.disableHands()
+      store.getState().setGestures(false)
+      return
+    }
+    store.getState().setError(null)
+    void hands
+      .enableHands()
+      .then(() => store.getState().setGestures(true))
+      .catch((err: Error) => {
+        store.getState().setGestures(false)
+        store
+          .getState()
+          .setError(
+            err?.name === 'NotAllowedError'
+              ? 'Camera access denied — gesture control is unavailable.'
+              : `Gesture control failed to start: ${err?.message ?? err}`,
+          )
+      })
   }
 
   const goDormant = () => {
@@ -422,6 +451,25 @@ export default function App() {
       }
     })
 
+    /** JARVIS asking to record a voice-enrollment clip. Whoever is about to
+     *  talk sees the banner and the mic level move — the same transparency
+     *  job the camera indicator does for `look`. */
+    watchVoiceEnroll(async (req) => {
+      store.getState().setVoiceEnrollStatus('recording your voice')
+      try {
+        return await recordEnrollment(req.seconds)
+      } catch (err) {
+        return {
+          error:
+            (err as DOMException)?.name === 'NotAllowedError'
+              ? 'Microphone access is not permitted, so nothing was recorded.'
+              : `The microphone could not be recorded: ${(err as Error)?.message ?? err}`,
+        }
+      } finally {
+        store.getState().setVoiceEnrollStatus(null)
+      }
+    })
+
     // The interface is JARVIS's to drive. These arrive out of band, pushed
     // mid-turn the way panels are, so a command can retint the reactor or put
     // something into orbit while he is still speaking the sentence about it.
@@ -446,6 +494,24 @@ export default function App() {
         case 'screen':
           s.clearScreen(a.what ?? 'all')
           break
+        case 'screen-status':
+          // Captured natively now (screen-native.mjs), not via getDisplayMedia
+          // in the browser — this is just the bridge telling the HUD what's
+          // happening so the capture isn't silent even without a picker.
+          s.setScreenStatus((a.status as string | null) ?? null)
+          break
+        case 'hands':
+          setHands(Boolean(a.on))
+          break
+        case 'move':
+          s.moveBlade(a.id || null, a.position)
+          break
+        case 'close': {
+          // null id means "the front one" — same convention moveBlade uses.
+          const target = (a.id as string) || s.focusedBlade || s.blades[s.blades.length - 1]?.id
+          if (target) s.closeBlade(target)
+          break
+        }
         default:
           console.warn('[jarvis] unknown ui op:', op, args)
       }
@@ -559,21 +625,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase])
 
-  // -- his name, at the ignition screen -------------------------------------
+  // -- "Hey Jarvis" to start --------------------------------------------------
 
   /**
-   * Saying "Hey Jarvis" at a dark reactor should bring him up, the same way a
-   * clap does. It could not before: the real voice loop is armed inside
-   * ignite(), so until someone had already pressed the button there was nothing
-   * listening for his name.
-   *
-   * Torn down on the way out of 'offline' for the same reason the clap listener
-   * is — the microphone is about to belong to the voice loop, and two
-   * recognisers on one stream each hear about half of what is said.
+   * Saying his name brings him up too, same as the clap. Runs alongside it —
+   * SpeechRecognition owns its own capture rather than sharing the analyser
+   * clap.ts opens, so the two don't fight over a stream — and is torn down the
+   * moment he boots, for the same reason the clap listener is: the microphone
+   * is about to belong to the real voice loop.
    */
   useEffect(() => {
     if (phase !== 'offline') return
-    const live = listenForWakeWord(() => void powerOn())
+    const live = listenForWake(() => void powerOn())
     return () => live.stop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase])
@@ -626,26 +689,7 @@ export default function App() {
       // thought it might be useful is not a trade anyone agreed to.
       if (e.key === 'g' && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault()
-        const on = store.getState().gestures
-        if (on) {
-          hands.disableHands()
-          store.getState().setGestures(false)
-        } else {
-          store.getState().setError(null)
-          void hands
-            .enableHands()
-            .then(() => store.getState().setGestures(true))
-            .catch((err: Error) => {
-              store.getState().setGestures(false)
-              store
-                .getState()
-                .setError(
-                  err?.name === 'NotAllowedError'
-                    ? 'Camera access denied — gesture control is unavailable.'
-                    : `Gesture control failed to start: ${err?.message ?? err}`,
-                )
-            })
-        }
+        setHands(!store.getState().gestures)
         return
       }
 

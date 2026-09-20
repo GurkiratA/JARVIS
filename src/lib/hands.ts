@@ -117,9 +117,13 @@ const SKELETON_BETA = 0.02
  *
  * Two thresholds, not one: it takes a tighter pinch to start a press than to
  * keep one, so the press cannot flicker on the boundary.
+ *
+ * Widened from 0.40/0.60: the tighter pair demanded a near-perfect pinch to
+ * grab anything, which read as the gesture "not working" rather than as
+ * precision. The wider gap still keeps a real margin between on and off.
  */
-const PINCH_ON = 0.40
-const PINCH_OFF = 0.60
+const PINCH_ON = 0.46
+const PINCH_OFF = 0.66
 
 /** A finger counts as extended when its tip is this much further from the
  *  wrist than its middle joint. Ratio rather than a y-comparison, so it still
@@ -132,8 +136,12 @@ const EXTEND_RATIO = 1.12
  * Fingers pass through other shapes on the way to the one you meant — a fist
  * becomes a point by way of several ambiguous frames — and acting on those
  * intermediate readings is what makes gesture interfaces feel possessed.
+ *
+ * Trimmed from 200: still comfortably past the few ambiguous frames a
+ * transition takes, but the frame (resize) pose used to feel like it lagged
+ * behind the hands closing into it.
  */
-const GESTURE_HOLD_MS = 200
+const GESTURE_HOLD_MS = 150
 
 /**
  * A pinch has to survive this long before it presses.
@@ -145,11 +153,11 @@ const GESTURE_HOLD_MS = 200
  * a pinch. Each of those fired a press — grabbing a blade you were not touching
  * and dropping it somewhere you did not choose.
  *
- * Seventy milliseconds is four frames. It is comfortably below the threshold at
- * which a press feels delayed, and comfortably above the one or two frames a
- * hand spends passing through a shape on its way to another one.
+ * Fifty-five milliseconds is about three frames — comfortably below the
+ * threshold at which a press feels delayed, and still above the one or two
+ * frames a hand spends passing through a shape on its way to another one.
  */
-const PINCH_CONFIRM_MS = 70
+const PINCH_CONFIRM_MS = 55
 
 /**
  * After the finger pose changes, presses are ignored for this long.
@@ -159,7 +167,7 @@ const PINCH_CONFIRM_MS = 70
  * pinch-shaped for a moment while the hand is still rearranging itself. Both
  * are needed, because they fail in opposite directions.
  */
-const POSE_SETTLE_MS = 220
+const POSE_SETTLE_MS = 180
 
 /** Below this many pixels of travel, a press was a click rather than a drag. */
 const CLICK_SLOP = 20
@@ -910,9 +918,17 @@ export function pinchCount(): number {
   return hands.filter((h) => h.pinched).length
 }
 
+/** Smoothed span from the last call, so a resize tracks the hands rather than
+ *  jittering with every noisy landmark frame. Reset the moment framing stops,
+ *  so the next resize starts from the true distance rather than an old one. */
+let smoothedSpan: number | null = null
+
 export function frameSpan(): number | null {
   const framing = hands.filter((h) => h.gesture === 'frame')
-  if (framing.length < 2) return null
+  if (framing.length < 2) {
+    smoothedSpan = null
+    return null
+  }
   const [a, b] = framing
   const corner = (h: Hand) => ({
     x: (h.points[THUMB_TIP].x + h.points[INDEX_TIP].x) / 2,
@@ -920,7 +936,49 @@ export function frameSpan(): number | null {
   })
   const ca = corner(a)
   const cb = corner(b)
-  return Math.hypot(ca.x - cb.x, ca.y - cb.y)
+  const raw = Math.hypot(ca.x - cb.x, ca.y - cb.y)
+  // A third of the way to the new reading each frame — enough to kill
+  // per-frame landmark noise without lagging a deliberate pull apart.
+  smoothedSpan = smoothedSpan === null ? raw : smoothedSpan + (raw - smoothedSpan) * 0.34
+  return smoothedSpan
+}
+
+/** Smoothed span from the last call — see the note on frameSpan's. Reset the
+ *  moment fewer than two hands are pinching. */
+let smoothedPinchSpan: number | null = null
+
+/**
+ * Both hands pinching, and how far apart the pinch points are.
+ *
+ * The other way to resize: pinch with both hands, the way you would pick up
+ * the two opposite corners of a photograph, and pull. Where `frameSpan` reads
+ * the L-shaped framing pose, this reads the ordinary grab pinch — the one
+ * gesture everybody already reaches for first — so a picture can be resized
+ * without first discovering a second, less obvious pose.
+ *
+ * This does not fight single-hand pinch-to-drag: `emit` in this file already
+ * dispatches a press per hand regardless of how many are pinching, and
+ * Blades.tsx already re-anchors rather than moves a drag once `pinchCount()`
+ * rises above one. Two hands pinching together already meant "not a drag" —
+ * this is what makes it mean something instead of nothing.
+ */
+export function pinchSpan(): number | null {
+  const pinching = hands.filter((h) => h.pinched)
+  if (pinching.length < 2) {
+    smoothedPinchSpan = null
+    return null
+  }
+  const [a, b] = pinching
+  const point = (h: Hand) => ({
+    x: (h.points[THUMB_TIP].x + h.points[INDEX_TIP].x) / 2,
+    y: (h.points[THUMB_TIP].y + h.points[INDEX_TIP].y) / 2,
+  })
+  const pa = point(a)
+  const pb = point(b)
+  const raw = Math.hypot(pa.x - pb.x, pa.y - pb.y)
+  smoothedPinchSpan =
+    smoothedPinchSpan === null ? raw : smoothedPinchSpan + (raw - smoothedPinchSpan) * 0.34
+  return smoothedPinchSpan
 }
 
 /**

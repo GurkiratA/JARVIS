@@ -84,6 +84,14 @@ export function watchCapture(
   if (usingBridge) bridge.watchCapture(fn)
 }
 
+/** The microphone's equivalent, for voice enrollment — same reasoning, same
+ *  bridge-only restriction. */
+export function watchVoiceEnroll(
+  fn: (req: bridge.VoiceEnrollRequest) => Promise<bridge.VoiceEnrollResult>,
+): void {
+  if (usingBridge) bridge.watchVoiceEnroll(fn)
+}
+
 /**
  * Barge-in. Stops the answer on both paths and settles whatever `ask()` call
  * is outstanding, so the caller's await always returns — on the bridge by

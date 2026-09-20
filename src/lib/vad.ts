@@ -74,8 +74,11 @@ const START_MS = 110
  * energy (see makeAssembler in voice.ts), so this can go back to being what it
  * should always have been — a cheap "have they stopped making noise" — and the
  * shorter window gets the transcript moving sooner.
+ *
+ * Trimmed further, from 650: JARVIS was visibly waiting after you'd finished
+ * a sentence. Still comfortably longer than the pause inside a word.
  */
-const SILENCE_MS = 650
+const SILENCE_MS = 480
 /** Nobody speaks one segment for this long; cut it and transcribe what we have. */
 const MAX_MS = 20000
 
